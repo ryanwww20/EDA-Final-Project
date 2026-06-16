@@ -25,8 +25,31 @@ def count_gates(verilog_code: str) -> Counter:
     return counts
 
 
-def main():
-    case_name = "test02"
+def format_gate_count_report(counts: Counter) -> str:
+    lines = ["Gate count:"]
+    total = 0
+    for gate in GATE_TYPES:
+        n = counts[gate]
+        total += n
+        lines.append(f"{gate}: {n}")
+    lines.append(f"TOTAL: {total}")
+    return "\n".join(lines)
+
+
+def report_gate_counts(verilog_code: str) -> str:
+    """Count gates and return a formatted report (for main.py / other callers)."""
+    return format_gate_count_report(count_gates(verilog_code))
+
+
+def report_gate_counts_from_file(path) -> str:
+    """Read a Verilog file, count gates, and return a formatted report."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Cannot find input file: {path}")
+    return report_gate_counts(path.read_text())
+
+
+def run_standalone(case_name: str = "test02") -> None:
     case_dir = Path("testcase") / case_name
     input_file = case_dir / f"{case_name}.v"
     output_file = case_dir / f"{case_name}_out.v"
@@ -43,15 +66,8 @@ def main():
     print(f"Input file: {input_file}")
     print(f"Output file: {output_file}")
     print()
-    print("Gate count:")
-    total = 0
-    for gate in GATE_TYPES:
-        n = counts[gate]
-        total += n
-        print(f"{gate}: {n}")
-
-    print(f"TOTAL: {total}")
+    print(format_gate_count_report(counts))
 
 
 if __name__ == "__main__":
-    main()
+    run_standalone()
