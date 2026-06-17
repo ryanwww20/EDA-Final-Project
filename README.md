@@ -44,7 +44,7 @@ stdin（自然語言請求，每行一條）
                 │
                 ├─ tools/analysis_fanin_fanout.py  ← cone / fanin / fanout 查詢
                 ├─ tools/analysis_logic.py          ← BDD-based formal analysis
-                ├─ tools/count_gate.py              ← 各類型 gate 計數
+                ├─ tools/analysis_netlist_stats.py  ← gate / netlist 統計查詢
                 └─ netlist_twoside.py               ← Verilog 解析 / 輸出 / IR
 
 stdout: #RESPONSE <id> ... #END <id>（每次回應後 flush）
@@ -208,7 +208,7 @@ EDA-Final-Project/
 │   ├── llm_planner.py           # Operation catalog、JSON plan executor、system prompt
 │   ├── analysis_fanin_fanout.py # Fanin/fanout/cone 分析（已實作）
 │   ├── analysis_logic.py        # BDD-based formal analysis（已實作）
-│   └── count_gate.py            # 各類型 gate 計數（已實作，待接線）
+│   └── analysis_netlist_stats.py # gate / netlist 統計查詢（已接線）
 │
 ├── docs/
 │   ├── EDA_tools.md             # 所有 testcase 的完整工具清單

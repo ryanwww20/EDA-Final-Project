@@ -5,7 +5,7 @@ ICCAD Contest Problem A - main pipeline / orchestrator.
 This file owns the I/O contract with the grading environment:
   - read natural-language requests from stdin, one per line
   - print a #RESPONSE <id> ... #END <id> block to stdout for each
-  - mirror every response into <case_name>.log
+  - mirror every response into output/log/<case_name>.log
   - flush after every #END (the grader waits for it before sending the next line)
 
 EDA operations and the LLM agent are stubbed out below; fill them in later.
@@ -15,6 +15,7 @@ Run:  ./cada0001_alpha -config <config_file_path>
 import sys
 import re
 import argparse
+import copy
 import json
 import os
 import urllib.error
@@ -25,6 +26,9 @@ from tools.llm_planner import (
     execute_plan,
     format_plan_results,
     get_llm_system_prompt,
+    resolve_log_path,
+    resolve_out_v_path,
+    try_parse_tool_request,
 )
 from tools.analysis_fanin_fanout import (
     dispatch_fanin_fanout_op,
@@ -46,6 +50,26 @@ from tools.analysis_path import (
     format_path_result,
     try_parse_path_request,
 )
+from tools.analysis_structural_health import (
+    dispatch_structural_health_op,
+    format_structural_health_result,
+    try_parse_structural_health_request,
+)
+from tools.analysis_transform_stats import (
+    dispatch_transform_stats_op,
+    format_transform_stats_result,
+    try_parse_transform_stats_request,
+)
+from tools.analysis_dff import (
+    dispatch_dff_op,
+    format_dff_result,
+    try_parse_dff_request,
+)
+from tools.verify_equivalence import (
+    dispatch_verify_op,
+    format_verify_result,
+    try_parse_verify_request,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +78,11 @@ from tools.analysis_path import (
 class State:
     def __init__(self):
         self.netlist = None        # current Netlist object (the "design state")
+        self.original_netlist = None   # snapshot of the design as first loaded
+        self.pre_transform_netlist = None  # snapshot before the last transform
+        self.last_transform_report = None  # report emitted by the last transform
+        self.transform_history = []    # ordered list of transform reports
+        self.loaded_path = None    # path the current design was parsed from
         self.case_name = None      # e.g. "test01"
         self.log_file = None       # open file handle for <case_name>.log
         self.config = None         # LLM config (api key, model, ...)
@@ -264,12 +293,12 @@ def handle_begin(line, state):
     if not m:
         m = re.search(r"\b((?:case|test)\w*\d+)\b", line)
     state.case_name = m.group(1) if m else "case"
-    # open the log file
+    log_path = resolve_log_path(state.case_name)
     if state.log_file:
         state.log_file.close()
-    state.log_file = open(f"{state.case_name}.log", "w")
+    state.log_file = open(log_path, "w")
     return (f'Acknowledged. Initialized testcase "{state.case_name}". '
-            f"All subsequent responses will be recorded to {state.case_name}.log. "
+            f"All subsequent responses will be recorded to {log_path}. "
             f"Design state is empty and ready for commands.")
 
 
@@ -288,6 +317,11 @@ def handle_load(line, state):
         if os.path.exists(candidate):
             path = candidate
     state.netlist = parse(path)
+    state.original_netlist = copy.deepcopy(state.netlist)
+    state.pre_transform_netlist = None
+    state.last_transform_report = None
+    state.transform_history = []
+    state.loaded_path = path
     s = summary(state.netlist)
     return (f"Loaded gate-level Verilog from {path} successfully.\n"
             f"- module: {s['module']}, single top module (flat netlist)\n"
@@ -304,7 +338,7 @@ def handle_write(line, state):
         return "Error: could not find an output .v filename in the request."
     if state.netlist is None:
         return "Error: no design loaded."
-    path = m.group(1)
+    path = resolve_out_v_path(m.group(1))
     dump(state.netlist, path)
     return f'Wrote the current design to "{path}" successfully.'
 
@@ -313,6 +347,16 @@ def handle_write(line, state):
 def handle_analysis(line, state):
     if state.netlist is None:
         return "Error: no design loaded."
+
+    request = try_parse_transform_stats_request(line)
+    if request is not None:
+        payload = dispatch_transform_stats_op(state, request)
+        return format_transform_stats_result(payload)
+
+    request = try_parse_tool_request(line)
+    if request is not None:
+        results = execute_plan(state, request)
+        return format_plan_results(results)
 
     request = try_parse_netlist_stats_request(line)
     if request is not None:
@@ -329,15 +373,34 @@ def handle_analysis(line, state):
         payload = dispatch_logic_op(state.netlist, request)
         return format_logic_result(payload)
 
+    request = try_parse_structural_health_request(line)
+    if request is not None:
+        payload = dispatch_structural_health_op(state.netlist, request)
+        return format_structural_health_result(payload)
+
     request = try_parse_path_request(line)
     if request is not None:
         payload = dispatch_path_op(state.netlist, request)
         return format_path_result(payload)
 
+    request = try_parse_dff_request(line)
+    if request is not None:
+        payload = dispatch_dff_op(state.netlist, request)
+        return format_dff_result(payload)
+
+    request = try_parse_verify_request(line)
+    if request is not None:
+        payload = dispatch_verify_op(state, request)
+        return format_verify_result(payload)
+
     return "[analysis not implemented yet]"
 
 
 def handle_transform(line, state):
+    request = try_parse_tool_request(line)
+    if request is not None:
+        results = execute_plan(state, request)
+        return format_plan_results(results)
     # TODO: call eda_ops.* transformation, then self-check (z3), then report.
     return "[transformation not implemented yet]"
 
@@ -373,7 +436,8 @@ def route_request(line, state):
     if re.search(
         r"\b(depth|path|equivalent|equivalence|identical|constant|boolean|logic|"
         r"symmetric|depend|always|cone|fanout|verify|exist|count|gates?|primary|"
-        r"width|widths|type|reachable|driven|successors)\b",
+        r"width|widths|type|reachable|driven|successors|dangling|floating|"
+        r"unconnected|redundant|tied|tie)\b",
         low,
     ):
         return handle_analysis(line, state)

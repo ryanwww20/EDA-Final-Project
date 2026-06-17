@@ -394,39 +394,51 @@
 | Function | 說明 | 首次出現 |
 |---|---|---|
 | `count_added_buffers()` | 新增多少 BUF | test31 |
+| `count_added_gates_of_type(type)` | 新增多少指定類型 gate（如 NOR / NAND remap 後新增量） | test35 |
 | `count_removed_dangling()` | 移除多少 dangling gate | test32, test33 |
+| `count_removed_redundant()` | 移除多少 redundant gate | test38 |
 | `count_merged_gates()` | merge 了多少 gate | test29, test33 |
 | `count_eliminated_by_const_prop(type)` | constant propagation 刪了多少 gate | test32, test36, test38, test39 |
 | `count_gates_in_cone_after_restructure(output, type)` | restructure 後 cone 內某類 gate 數 | test33, test37 |
 | `cone_depth_after_opt(output)` | optimization 後 cone depth | test40 |
 
 #### `count_added_buffers()`
-- **Description:**
+- **Description:** 回報最近一次 buffer insertion transformation 新增的 BUF 數量。已實作於 `tools/analysis_transform_stats.py`，優先讀取 `State.last_transform_report` / `transform_history`，沒有 report 時才嘗試用 pre-transform snapshot 與 current netlist 的 BUF 數量差分估算。
+
+---
+
+#### `count_added_gates_of_type(type)`
+- **Description:** 回報最近一次相關 transformation 新增的指定 gate type 數量，例如 XNOR-to-NOR 或 XOR-to-NAND remap 後新增的 NOR / NAND。已實作於 `tools/analysis_transform_stats.py`。
 
 ---
 
 #### `count_removed_dangling()`
-- **Description:**
+- **Description:** 回報最近一次 dangling cleanup 移除的 dangling gate 數量。已實作於 `tools/analysis_transform_stats.py`，語意是 transformation delta，不是目前 dangling gate 總數。
+
+---
+
+#### `count_removed_redundant()`
+- **Description:** 回報最近一次 redundancy cleanup 移除的 redundant gate 數量。已實作於 `tools/analysis_transform_stats.py`。
 
 ---
 
 #### `count_merged_gates()`
-- **Description:**
+- **Description:** 回報最近一次 merge transformation 合併 / 移除的 gate 數量。已實作於 `tools/analysis_transform_stats.py`，主要讀取 transformation report 中的 `merged_gates` / `merge_count` / `removed_duplicate_gates` 等欄位。
 
 ---
 
 #### `count_eliminated_by_const_prop(type)`
-- **Description:**
+- **Description:** 回報最近一次 constant propagation 消除的指定 gate type 數量。已實作於 `tools/analysis_transform_stats.py`，優先讀取 transformation report 中的 by-type removed / eliminated 統計。
 
 ---
 
 #### `count_gates_in_cone_after_restructure(output, type)`
-- **Description:**
+- **Description:** 回報目前 netlist 中，指定 output fanin cone 內指定 gate type 的數量。已實作於 `tools/analysis_transform_stats.py`，底層重用 `tools/analysis_netlist_stats.py` 的 `count_gates_by_type_in_cone()`，屬於 current-state query，不是 delta。
 
 ---
 
 #### `cone_depth_after_opt(output)`
-- **Description:**
+- **Description:** 回報目前 netlist 中指定 output fanin cone 的 logic depth。已實作於 `tools/analysis_transform_stats.py`，底層重用 `tools/analysis_netlist_stats.py` 的 `max_fanin_cone_depth()`，屬於 current-state query，不是 delta。
 
 ---
 

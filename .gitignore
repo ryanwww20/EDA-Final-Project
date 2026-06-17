@@ -1,8 +1,8 @@
 testcase
 __pycache__
-docs/
 *.v
 tmp_*
 config_openai.yml
 testcase.zip
 *.pdf
+*.log

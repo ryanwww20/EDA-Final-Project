@@ -378,6 +378,8 @@ def try_parse_netlist_stats_request(line: str) -> dict[str, Any] | None:
     # per-type counts: "how many NOT gates are currently in the design?"
     if m := re.search(rf"how many\s+{_GATE_WORD}\s+gates", line, re.I):
         return {"op": "count_gates_of_type", "args": {"type": m.group(1)}}
+    if m := re.search(rf"(?:total\s+)?{_GATE_WORD}\s+gate count", line, re.I):
+        return {"op": "count_gates_of_type", "args": {"type": m.group(1)}}
 
     # gate-type counts in a cone
     if m := re.search(rf"number of each gate type in the cone of\s+{_NAME}", line, re.I):
