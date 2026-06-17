@@ -30,6 +30,7 @@ from tools.llm_planner import (
     resolve_out_v_path,
     try_parse_tool_request,
 )
+from tools.llm_pipeline import run_llm_pipeline
 from tools.analysis_fanin_fanout import (
     dispatch_fanin_fanout_op,
     format_analysis_result,
@@ -196,8 +197,8 @@ def _llm_is_configured(config):
     return bool(_cfg(config, "model") and _llm_api_key(config))
 
 
-def request_llm_plan(line, state):
-    """Ask a configured cloud LLM for a JSON plan."""
+def request_llm_text(state, system_prompt, user_content, json_response=False):
+    """Ask a configured cloud LLM for text."""
     config = state.config or {}
     provider = str(_cfg(config, "provider", "openai")).lower()
     model = _cfg(config, "model")
@@ -209,25 +210,13 @@ def request_llm_plan(line, state):
     timeout = _cfg(config, "timeout", 30)
     max_output_tokens = _cfg(config, "max_output_tokens")
 
-    design_context = {}
-    if state.netlist is not None:
-        design_context = summary(state.netlist)
-    user_content = json.dumps(
-        {
-            "request": line,
-            "case_name": state.case_name,
-            "design_summary": design_context,
-        },
-        ensure_ascii=True,
-    )
-
     if provider == "anthropic":
         base_url = _cfg(config, "base_url", "https://api.anthropic.com/v1/messages")
         payload = {
             "model": model,
             "temperature": temperature,
             "max_tokens": int(max_output_tokens or 4096),
-            "system": get_llm_system_prompt(),
+            "system": system_prompt,
             "messages": [{"role": "user", "content": user_content}],
         }
         request = urllib.request.Request(
@@ -245,12 +234,13 @@ def request_llm_plan(line, state):
         payload = {
             "model": model,
             "temperature": temperature,
-            "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": get_llm_system_prompt()},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
         }
+        if json_response:
+            payload["response_format"] = {"type": "json_object"}
         if max_output_tokens is not None:
             payload["max_tokens"] = int(max_output_tokens)
 
@@ -278,6 +268,34 @@ def request_llm_plan(line, state):
                 return block.get("text", "")
         raise RuntimeError("Anthropic response did not contain text content.")
     return data["choices"][0]["message"]["content"]
+
+
+def request_llm_plan(line, state):
+    """Ask a configured cloud LLM for a JSON plan."""
+    design_context = {}
+    if state.netlist is not None:
+        design_context = summary(state.netlist)
+    user_content = json.dumps(
+        {
+            "request": line,
+            "case_name": state.case_name,
+            "design_summary": design_context,
+        },
+        ensure_ascii=True,
+    )
+    return request_llm_text(state, get_llm_system_prompt(), user_content, json_response=True)
+
+
+def _llm_pipeline_enabled(config):
+    return _cfg_bool(config, "pipeline_mode", False)
+
+
+def _max_pipeline_iterations(config):
+    return int(_cfg(config, "max_pipeline_iterations", 10))
+
+
+def _max_pipeline_repeated_errors(config):
+    return int(_cfg(config, "max_pipeline_repeated_errors", 3))
 
 
 # ---------------------------------------------------------------------------
@@ -419,9 +437,24 @@ def route_request(line, state):
 
     if _llm_is_configured(state.config):
         try:
-            plan_json = request_llm_plan(line, state)
-            results = execute_plan(state, plan_json)
-            return format_plan_results(results)
+            if _llm_pipeline_enabled(state.config):
+                result = run_llm_pipeline(
+                    line,
+                    state,
+                    lambda system, user, json_response=False: request_llm_text(
+                        state,
+                        system,
+                        user,
+                        json_response=json_response,
+                    ),
+                    max_iterations=_max_pipeline_iterations(state.config),
+                    max_repeated_errors=_max_pipeline_repeated_errors(state.config),
+                )
+                return result.response
+            else:
+                plan_json = request_llm_plan(line, state)
+                results = execute_plan(state, plan_json)
+                return format_plan_results(results)
         except Exception as e:
             if _cfg_bool(state.config, "strict", False):
                 return f"LLM routing failed: {e}"

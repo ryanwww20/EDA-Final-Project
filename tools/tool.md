@@ -373,19 +373,25 @@
 | `verify_equivalent_to_original()` | 與最初 load 的 netlist 等價 | test32, test34, test36, test40 |
 | `verify_equivalent_to_pre_transform()` | 與上一個 transformation 前等價 | test31, test35, test37 |
 | `prove_equivalent_to_loaded()` | 與 disk 上原始檔等價 | test33, test38 |
+| `verify_equivalent_sat()` | 用 miter + SAT 與最初 load 的 netlist 等價（深 XOR / 大設計用，會給反例） | 補充引擎 |
 
 #### `verify_equivalent_to_original()`
-- **Description:**
+- **Description:** 比對目前設計與「最初 load 的設計快照」（load 時以 deepcopy 存於 state）。序列等價降為暫存器邊界的組合等價：flop 以 Q net 配對，逐一用 BDD 比較每個 PO 與每顆 flop 的 D 函數。已實作於 `tools/verify_equivalence.py`。
 
 ---
 
 #### `verify_equivalent_to_pre_transform()`
-- **Description:**
+- **Description:** 比對目前設計與「上一次 transformation 之前的快照」（`state.pre_transform_netlist`）。若尚未做過任何 transform，退回與 original 比較。BDD 引擎。已實作於 `tools/verify_equivalence.py`。
 
 ---
 
 #### `prove_equivalent_to_loaded()`
-- **Description:**
+- **Description:** 重新 parse disk 上的原始 `.v` 檔（`state.loaded_path`）並與目前設計比對。BDD 引擎。已實作於 `tools/verify_equivalence.py`。
+
+---
+
+#### `verify_equivalent_sat()`
+- **Description:** 與 `verify_equivalent_to_original` 相同的比對對象（最初 load 的設計），但改用 **miter + SAT** 引擎：把兩份 netlist 經 Tseitin 編成共用 PI/flop-Q 變數的 CNF，對每個 PO 與每顆 flop 的 D 函數建 XOR diff 組成 miter，交給 `pysat` 的 Glucose3 求解。UNSAT → 等價;SAT → 不等價並回傳**反例輸入向量**。BDD 會爆炸的深 XOR cone（如 test06 depth 73）用這個。已實作於 `tools/verify_equivalence.py`。
 
 ---
 
