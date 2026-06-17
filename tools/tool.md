@@ -23,57 +23,57 @@
 | `list_nand_gates_with_pins()` | 列出 NAND 與 I/O signal | test35 |
 
 #### `count_fanin_cone_gates(output)`
-- **Description:**
+- **Description:** 回傳某 primary output 的 transitive fanin cone 內 gate 總數。已實作於 `tools/analysis_fanin_fanout.py`。
 
 ---
 
 #### `max_fanin_cone_depth(output)`
-- **Description:**
+- **Description:** 回傳某 output fanin cone 的最大組合邏輯深度（gate level 數）。PI / 常數 / DFF-Q 深度為 0，gate 深度 = 1 + max(輸入深度)。DFF 為邊界。已實作於 `tools/analysis_netlist_stats.py`。
 
 ---
 
 #### `count_total_gates()`
-- **Description:**
+- **Description:** 由 IR 統計各類型 gate 數（AND, OR, NOT, NAND, NOR, XOR, XNOR, BUF, DFF）與總數。已實作於 `tools/analysis_netlist_stats.py`。
 
 ---
 
 #### `count_gates_by_type_in_cone(output)`
-- **Description:**
+- **Description:** 統計某 output 的 fanin cone 內各類型 gate 數量。已實作於 `tools/analysis_netlist_stats.py`。
 
 ---
 
 #### `count_gates_of_type(type)`
-- **Description:**
+- **Description:** 統計指定類型（如 NOT、NAND、XOR）的 gate 總數。已實作於 `tools/analysis_netlist_stats.py`。
 
 ---
 
 #### `count_primary_inputs_outputs()`
-- **Description:**
+- **Description:** 回報 primary input / output 的數量，同時提供 port 數與 bit 數。已實作於 `tools/analysis_netlist_stats.py`。
 
 ---
 
 #### `list_primary_inputs_with_widths()`
-- **Description:**
+- **Description:** 依 module port 順序列出所有 primary input 及其 bit width。已實作於 `tools/analysis_netlist_stats.py`。
 
 ---
 
 #### `list_primary_outputs_with_widths()`
-- **Description:**
+- **Description:** 依 module port 順序列出所有 primary output 及其 bit width。已實作於 `tools/analysis_netlist_stats.py`。
 
 ---
 
 #### `get_gate_info(gate)`
-- **Description:**
+- **Description:** 回報某 gate 的類型與 pin 連接（primitive gate 回傳 output/inputs；DFF 回傳具名 ports）。已實作於 `tools/analysis_netlist_stats.py`。
 
 ---
 
 #### `list_gates_of_type(type)`
-- **Description:**
+- **Description:** 列出指定類型所有 gate 的 instance 名稱。已實作於 `tools/analysis_netlist_stats.py`。
 
 ---
 
 #### `list_nand_gates_with_pins()`
-- **Description:**
+- **Description:** 列出所有 NAND gate 及其 input / output signal。已實作於 `tools/analysis_netlist_stats.py`。
 
 ---
 
@@ -96,67 +96,67 @@
 | `max_fanout_of_signal(wire)` | 某 signal 目前最大 fanout | test34, test36, test38 |
 
 #### `query_input_fanout(input)`
-- **Description:**
+- **Description:** 查詢某 primary input / signal 的直接 fanout，回傳由該 input 直接驅動的 gate instance 列表；fanout 數量可由列表長度取得。對應目前 `tools/analysis_fanin_fanout.py` 的 `immediate_fanout_gates()` / fanout index 實作。
 
 ---
 
 #### `count_gates_driven_by(gate)`
-- **Description:**
+- **Description:** 計算某 gate output 直接驅動的 gate 數量。gate 名稱會先解析成其 output signal，再查詢該 signal 的 immediate loads；語意等同 `len(immediate_fanout_gates(gate))`。對應目前 `tools/analysis_fanin_fanout.py` 實作。
 
 ---
 
 #### `list_immediate_successors(gate)`
-- **Description:**
+- **Description:** 列出某 gate 的 immediate successor gates，也就是直接消耗該 gate output signal 的 load gates。DFF 的 D / CK / RN / SN pins 會依 fanout index 視為 loads。對應目前 `tools/analysis_fanin_fanout.py` 的 `immediate_fanout_gates()`。
 
 ---
 
 #### `transitive_fanin_cone(output)`
-- **Description:**
+- **Description:** 回傳 target gate 或 signal 的 transitive fanin cone 內所有 gate instance 名稱。PI / constant 為 fanin 邊界；DFF 在 fanin traversal 中作為 sequential boundary，不跨過 flop 的 Q 往前追。已實作於 `tools/analysis_fanin_fanout.py`。
 
 ---
 
 #### `transitive_fanout_cone(input)`
-- **Description:**
+- **Description:** 回傳 source gate 或 signal 的 transitive fanout cone 內所有可達 gate instance 名稱。若 source 是 gate，會先解析成該 gate 的 output signal；走到 DFF load 後會收集該 DFF 但不再穿越其 Q 繼續 traversal。已實作於 `tools/analysis_fanin_fanout.py`。
 
 ---
 
 #### `gates_reachable_from(node)`
-- **Description:**
+- **Description:** 列出從某 node（gate 或 signal）沿 fanout 方向可達的所有 gate；語意對應目前的 `transitive_fanout_cone(source)`，使用 combinational/data fanout traversal 並在 DFF 邊界停止。對應目前 `tools/analysis_fanin_fanout.py` 實作。
 
 ---
 
 #### `shared_fanin_cone_gates(out1, out2)`
-- **Description:**
+- **Description:** 分別計算兩個 target/output 的 transitive fanin cone，回傳兩個 cone 交集中的共用 gate instance 名稱。已實作於 `tools/analysis_fanin_fanout.py`。
 
 ---
 
 #### `gates_connected_to_output(gate)`
-- **Description:**
+- **Description:** 列出直接連到某 gate output signal 的所有 load gates；語意等同查詢該 gate 的 immediate fanout / successors。對應目前 `tools/analysis_fanin_fanout.py` 的 `immediate_fanout_gates()`。
 
 ---
 
 #### `gates_driven_by_signal(wire)`
-- **Description:**
+- **Description:** 列出由指定 signal/wire 直接驅動的 gate instance 名稱。查詢結果來自 fanout index 的 loads；若需要排除 DFF clock/reset/set pins，可使用目前實作中的 data fanout variant。對應目前 `tools/analysis_fanin_fanout.py`。
 
 ---
 
 #### `deepest_fanin_cone_output()`
-- **Description:**
+- **Description:** 找出 fanin cone 組合邏輯深度最大的 primary output，深度定義與 `max_fanin_cone_depth(output)` 相同（PI / constant / DFF-Q 深度為 0，gate 深度為 1 + max(input depth)）。目前可由 `tools/analysis_netlist_stats.py` 的 depth query 對所有 PO 掃描取得，尚未作為 1.2 的獨立公開 OP。
 
 ---
 
 #### `largest_fanin_cone_output()`
-- **Description:**
+- **Description:** 對所有 primary output 計算 fanin cone gate 數，回傳 cone 最大的 output 及其 cone size；若沒有 PO 則回傳空名稱與 0。已實作於 `tools/analysis_fanin_fanout.py`。
 
 ---
 
 #### `highest_fanout_primary_input()`
-- **Description:**
+- **Description:** 掃描所有 primary inputs，回傳直接 fanout load 數最高的 PI 與 fanout count。`highest_fanout_primary_input()` 統計所有 pins；目前也有 `highest_data_fanout_primary_input()` 可排除 DFF clock/reset/set pins。已實作於 `tools/analysis_fanin_fanout.py`。
 
 ---
 
 #### `max_fanout_of_signal(wire)`
-- **Description:**
+- **Description:** 回傳指定 signal/wire 目前的直接 fanout load 數，語意等同查詢 fanout index 中該 wire 的 loads 數量；gate load 名稱可由 `immediate_fanout_gates(wire)` 取得。目前可由 `tools/analysis_fanin_fanout.py` 的 index/helper 組合取得，尚未作為獨立公開 OP。
 
 ---
 
@@ -269,42 +269,42 @@
 | `exists_nand_pair_equivalent_to(wire)` | 是否存在 (a,b) 使 NAND(a,b) ≡ z | test35 |
 
 #### `signals_equivalent(sig_a, sig_b)`
-- **Description:**
+- **Description:** 將兩個 signal 轉成 Boolean expression / BDD 後檢查 functional equivalence，回傳兩者在所有輸入組合下是否等價。DFF 與不支援的 gate type 會視為 symbolic boundary。已實作於 `tools/analysis_logic.py`。
 
 ---
 
 #### `output_always_constant(output, val)`
-- **Description:**
+- **Description:** 判斷指定 output 的 Boolean function 是否恆等於 `val`（0 / 1 / true / false）。實作會建立 output expression 並用 BDD constant check 驗證。已實作於 `tools/analysis_logic.py`。
 
 ---
 
 #### `output_depends_on_input(out, inp)`
-- **Description:**
+- **Description:** 判斷 output 的 Boolean function 是否 functional dependent on 指定 input；若切換該 input 可能改變 output，則回傳 true。已實作於 `tools/analysis_logic.py`。
 
 ---
 
 #### `derive_boolean_equation(output)`
-- **Description:**
+- **Description:** 從 netlist fanin 遞迴推導某 output 的 Boolean equation，輸出格式為 `output = expression`。常數會轉為 0/1，DFF 或未知 driver 會作為 symbolic variable 邊界。已實作於 `tools/analysis_logic.py`。
 
 ---
 
 #### `write_logic_expression(wire)`
-- **Description:**
+- **Description:** 推導並回傳某 wire/signal 對應的 Boolean logic expression，不包含左側 assignment 名稱。其 expression 建構規則與 `derive_boolean_equation()` 相同。已實作於 `tools/analysis_logic.py`。
 
 ---
 
 #### `boolean_function_of_output(output)`
-- **Description:**
+- **Description:** 回傳某 output 的 Boolean function；目前實作為 `derive_boolean_equation(output)` 的別名，因此輸出同樣是 `output = expression`。已實作於 `tools/analysis_logic.py`。
 
 ---
 
 #### `function_symmetric(node, in_a, in_b)`
-- **Description:**
+- **Description:** 檢查某 node/signal 的 Boolean function 是否對兩個指定 input 對稱，也就是交換 `in_a` 與 `in_b` 後 function 是否保持不變。已用 BDD symmetry check 實作於 `tools/analysis_logic.py`。
 
 ---
 
 #### `exists_nand_pair_equivalent_to(wire)`
-- **Description:**
+- **Description:** 在目標 wire 的 fanin cone 內搜尋既有 internal signals `(a, b)`，判斷是否存在 `NAND(a, b)` 與該 wire functionally equivalent；允許 `a == b`，找不到 cone-local candidate 時會退回掃描部分全設計 internal signals。已實作於 `tools/analysis_logic.py`。
 
 ---
 
