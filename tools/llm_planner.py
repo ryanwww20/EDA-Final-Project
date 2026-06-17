@@ -97,11 +97,20 @@ def resolve_out_v_path(path: str) -> str:
 def _handle_begin(state: Any, request: dict[str, Any]) -> dict[str, Any]:
     args = request.get("args", {})
     case_name = args.get("case_name") or "case"
-    state.case_name = case_name
     log_path = resolve_log_path(case_name)
-    if state.log_file:
-        state.log_file.close()
-    state.log_file = open(log_path, "w")
+    # If the same testcase is already initialized with an open log, keep it open
+    # so we never truncate responses already written for this testcase. Only
+    # (re)open with "w" when starting a different/new testcase.
+    already_open = (
+        state.log_file is not None
+        and not state.log_file.closed
+        and state.case_name == case_name
+    )
+    state.case_name = case_name
+    if not already_open:
+        if state.log_file:
+            state.log_file.close()
+        state.log_file = open(log_path, "w")
     return {
         "op": "begin_testcase",
         "result": (

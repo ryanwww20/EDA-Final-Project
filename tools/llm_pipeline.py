@@ -200,17 +200,34 @@ def request_llm_next_operation(
     current_plan: str,
     history: list[dict[str, Any]],
     llm_call: LLMCaller,
+    *,
+    request_text: str = "",
 ) -> str:
     """Ask the LLM to produce operation.json as JSON only."""
     system_prompt = (
         "You are an EDA operation selector. Return JSON only. "
         "Use only operations from the implemented backend catalog, or emit "
-        '`{"op":"final_answer","args":{"answer":"..."}}` when the task is complete.'
+        '`{"op":"final_answer","args":{"answer":"..."}}` when THE CURRENT REQUEST '
+        "is fully answered.\n"
+        "Critical rules:\n"
+        "- Answer ONLY the current request. Do not perform work it did not ask for.\n"
+        "- The design state PERSISTS across requests. history.json lists what is "
+        "already done. NEVER re-run begin_testcase, load_design, or write_design "
+        "if history shows it already succeeded and the current request does not "
+        "ask for it again.\n"
+        "- The current request maps to begin_testcase ONLY if it announces a new "
+        "testcase; to load_design ONLY if it names a file to read; to write_design "
+        "ONLY if it asks to write/output a file.\n"
+        "- NEVER invent a file path, signal, or gate name. Use exact names from the "
+        "current request. If a required argument is not present in the request, do "
+        "not guess -- choose a different operation or emit final_answer."
     )
     user_content = (
+        "# Current Request (answer ONLY this)\n"
+        f"{request_text}\n\n"
         "# Current Plan\n"
         f"{current_plan}\n\n"
-        "# history.json\n"
+        "# history.json (already executed; do not repeat)\n"
         f"{_json_block(history)}\n\n"
         "# Case Context\n"
         f"{_json_block({'case_name': getattr(state, 'case_name', None), 'design_summary': _design_context(state)})}\n\n"
@@ -223,7 +240,7 @@ def request_llm_next_operation(
         "Return one concrete operation unless a small ordered batch is necessary. "
         "The normal schema is:\n"
         '{"operations":[{"op":"operation_name","args":{}}]}\n'
-        "Use exact signal, gate, and file names from the prompt/history."
+        "Use exact signal, gate, and file names from the current request/history."
     )
     return llm_call(system_prompt, user_content, True).strip()
 
@@ -362,16 +379,31 @@ def run_llm_pipeline(
     case_name = getattr(state, "case_name", None) or infer_case_name(prompt_text)
     paths = get_pipeline_paths(state, case_name=case_name)
     os.makedirs(paths.root, exist_ok=True)
-    write_text(paths.debug, "")
-    append_debug(paths.debug, f"pipeline_dir={paths.root}")
+
+    # Records persist across every request of a testcase and are reset only when
+    # a new testcase begins (case_name changes) -- this keeps a full execution
+    # trail in history.json / debug.log as docs/llm_pipeline.md intends, while
+    # main() still answers one stdin line at a time per the PDF contract.
+    prev_case = getattr(state, "_pipeline_case", None)
+    new_testcase = prev_case != case_name
+    state._pipeline_case = case_name
+    if new_testcase or not os.path.exists(paths.history):
+        write_text(paths.debug, "")
+        initialize_history(paths.history)
+        append_debug(paths.debug, f"pipeline_dir={paths.root}")
+        append_debug(paths.debug, f"initialized history.json={paths.history}")
+    append_debug(paths.debug, f"\n=== request: {prompt_text!r} (case={case_name}) ===")
+
+    # Everything recorded by earlier requests in this testcase stays on disk as
+    # the record, but the LLM only sees this request's slice so prior requests
+    # do not confuse planning or trip completion detection early.
+    base_len = len(read_history(paths.history))
 
     plan = request_llm_high_level_plan(prompt_text, state, llm_call)
     write_text(paths.plan, plan + ("\n" if not plan.endswith("\n") else ""))
     write_text(paths.current_plan, plan + ("\n" if not plan.endswith("\n") else ""))
-    initialize_history(paths.history)
     append_debug(paths.debug, f"wrote plan.md={paths.plan}")
     append_debug(paths.debug, f"wrote current-plan.md={paths.current_plan}")
-    append_debug(paths.debug, f"initialized history.json={paths.history}")
 
     current_plan = plan
     final_answer: str | None = None
@@ -382,7 +414,9 @@ def run_llm_pipeline(
     for iteration in range(1, max(0, max_iterations) + 1):
         iteration_count = iteration
         history = read_history(paths.history)
-        raw_operation = request_llm_next_operation(state, current_plan, history, llm_call)
+        raw_operation = request_llm_next_operation(
+            state, current_plan, history, llm_call, request_text=prompt_text
+        )
         write_text(paths.operation, raw_operation + ("\n" if not raw_operation.endswith("\n") else ""))
         append_debug(paths.debug, f"iteration={iteration} wrote operation.json={paths.operation}")
 
@@ -447,7 +481,8 @@ def run_llm_pipeline(
         append_debug(paths.debug, "stop_reason=max_iterations")
 
     history = read_history(paths.history)
-    response = final_answer if final_answer is not None else _latest_response_text(history)
+    request_history = history[base_len:]
+    response = final_answer if final_answer is not None else _latest_response_text(request_history)
     if not response:
         response = format_plan_results([])
     return PipelineRunResult(

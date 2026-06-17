@@ -461,23 +461,25 @@
 | `insert_buffer_per_load(signal)` | 某 signal 每個 load 各加 BUF | test31 |
 | `insert_buffers_on_signal(signal, max=4)` | 對 clock/reset 等特定 signal 加 buffer | test34, test36, test38 |
 
+> **共同實作說明（`tools/transform_fanout.py`）**：buffer 用 1-input `buf` gate 表示。每個 transform 流程為 **snapshot → 變動 IR → miter+SAT self-check 等價 → 不等價則 rollback**，並寫入 `state.last_transform_report` / `transform_history`（report key `added_gates_by_type={"buf": N}`，供 1.8 `count_added_buffers` 讀取）。IR 不變式（`driver`/`drivers`/`fanout`）在每次變動後整體 `_reindex` 重建。dispatch 為 state-aware。
+
 #### `insert_buffers_max_fanout(max=4)`
-- **Description:**
+- **Description:** 全 design 掃描,對每個 fanout > max 的 net（PI 與 gate output）插入**平衡 buffer 樹**:loads 每 max 個一組各掛一顆 buffer,層層往上,直到 root net 與每顆 buffer 都只驅動 ≤ max 個 load。功能等價（buf 為 identity）。test21 實測 max fanout 55→4,86 顆 buffer,等價通過。
 
 ---
 
 #### `fanout_optimization(max=4)`
-- **Description:**
+- **Description:** 全 netlist fanout 優化,與 `insert_buffers_max_fanout` 共用同一核心 `_optimize_all_fanout`(分開命名以對應不同 test 措辭)。
 
 ---
 
 #### `insert_buffer_per_load(signal)`
-- **Description:**
+- **Description:** 對指定 signal 的**每一個** load 各掛一顆專屬 buffer（load 隔離）:signal → buf_i → load_i。不改變 signal 的扇出數,但每顆 buffer 只驅動單一 load。
 
 ---
 
 #### `insert_buffers_on_signal(signal, max=4)`
-- **Description:**
+- **Description:** 只對**指定** signal（如 clock / reset）套用平衡 buffer 樹,把該 signal 的 fanout 降到 ≤ max。loads 含 DFF 的 CK/RN/SN pin。
 
 ---
 
@@ -491,28 +493,34 @@
 | `optimize_cone_depth(output, target)` | 某 output cone depth ≤ target | test26, test27, test33, test40 |
 | `optimize_outputs_depth_gt(n, target)` | 所有 depth > n 的 output 都優化 | test27 |
 
+> **共同實作說明（`tools/transform_depth.py` + `algorithm/aig.py`）**
+> 引擎 = **AIG 重構**：把要重建的 cone 經 Tseitin 轉成 And-Inverter Graph（NAND/NOR/NOT/AND/OR 統一成 AND+反相邊；XOR/XNOR 保持 atomic 不拆，避免面積爆炸）→ **共享感知平衡**（supergate 只在扇出=1 內部展開，不複製 → 面積中性）→ **反相器吸收式映射**回 `and/nand/or/nor/not`（同極性反相被 NAND/NOR 吸收，只有混合極性才加 NOT）。
+> 每次 transform：snapshot → 重建 → **接受準則**：唯有「功能等價(SAT miter) 且深度確實下降」才採用,否則 **rollback 保留原設計**（優化器永不變糟）。寫入 `transform_history`。
+> 實測：test27 `optimize_cone_depth` 10→7（−30%）、test25 `depth_optimization` 49→44。NAND 主導且已近最佳的 cone 會被接受準則跳過（保留原樣）。深度量測取 PI→PO / PI→DFF.D / reg→reg 三者最大。
+> ⚠️ 限制：大設計（如 test33 64k）的 SAT 自檢偏慢;whole-design 重建較保守,cone-targeted 效果最好。要逼近 ABC 等級深度需更強的 depth-priority tech-mapper。
+
 #### `reduce_critical_path_depth()`
-- **Description:**
+- **Description:** 用 AIG 重構降低 critical-path 深度（whole-design）。改善才採用。
 
 ---
 
 #### `depth_optimization()`
-- **Description:**
+- **Description:** 全設計 AIG 重構降深度（重建所有 PO 與 DFF-D cone）。改善才採用,否則保留原設計。
 
 ---
 
 #### `minimize_max_path_depth()`
-- **Description:**
+- **Description:** 最小化最大組合 path 深度,whole-design AIG 重構。語意同 `depth_optimization`,對應不同 test 措辭。
 
 ---
 
 #### `optimize_cone_depth(output, target)`
-- **Description:**
+- **Description:** 只重建指定 output 的 fanin cone,以 AIG 平衡降深度,目標 ≤ target。report 含 `target_met`。cone-targeted 效果最佳（test27 10→7）。
 
 ---
 
 #### `optimize_outputs_depth_gt(n, target)`
-- **Description:**
+- **Description:** 對所有 cone depth > n 的 primary output 一起做 AIG 重構,目標 ≤ target。report 含 `optimized_outputs` 與 `all_met`。
 
 ---
 
@@ -529,43 +537,45 @@
 | `merge_functionally_equivalent_gates()` | 合併 functionally equivalent gate pair | test29 |
 | `merge_structural_duplicate_gates()` | 合併 structural duplicate | test33 |
 
+> **共同實作說明（`tools/transform_cleanup.py`）**：全部 equivalence-preserving;dispatch 為 state-aware,每次 snapshot → 變動 → **SAT miter 自檢**,不等價就 rollback,寫入 `transform_history`。共用 `_replace_consumers`（重接 load）、`_dead_gate_elim`（從 PO/DFF pin 反向可達清除死 gate）、`_reindex`。偵測重用 `analysis_structural_health` 的 `dangling_gates`/`redundant_gates`/`find_floating_signals`。
+
 #### `remove_dangling_gates()`
-- **Description:**
+- **Description:** 移除無法反向到達任何 PO / DFF pin 的 gate（dead-code elimination,保留所有 DFF）。
 
 ---
 
 #### `remove_floating_nodes()`
-- **Description:**
+- **Description:** 移除輸入 floating（無 driver 且非 PI）或輸出無人使用的 gate;回報 floating signals。底層同 DCE。
 
 ---
 
 #### `prune_unused_gates()`
-- **Description:**
+- **Description:** 刪除其值從不被任何 output 觀察到的邏輯（DCE 變體）。
 
 ---
 
 #### `remove_redundant_gates()`
-- **Description:**
+- **Description:** 移除結構冗餘 gate（與另一顆 gate 同型同輸入),重接到保留者後 DCE 清除。
 
 ---
 
 #### `collapse_back_to_back_inverters()`
-- **Description:**
+- **Description:** 把 `NOT(NOT(x))` 折成直接連到 x,buf 亦折除;之後 DCE 清掉變死的 inverter。PO 直驅的雙反相保守保留以確保 PO 有 driver。
 
 ---
 
 #### `constant_propagation(type)`
-- **Description:**
+- **Description:** 對含常數輸入的 gate 化簡到 fixpoint:`and(x,1)→x`、`and(x,0)→0`、`or`/`nand`/`nor`/`xor`/`xnor`/`not`/`buf` 同理;`type` 可限定 gate 類型。PO 直驅的化簡轉成 frozen buffer 避免無窮迴圈。
 
 ---
 
 #### `merge_functionally_equivalent_gates()`
-- **Description:**
+- **Description:** 先做結構重複合併,再對 support ≤ 12 的訊號用 **BDD** 兩兩比對合併功能等價的 gate（如 `or(a,b) ≡ nand(¬a,¬b)`),重接後 DCE。
 
 ---
 
 #### `merge_structural_duplicate_gates()`
-- **Description:**
+- **Description:** 合併同型同輸入（commutative 類排序輸入）的 gate 到 fixpoint,重接 load 後刪除重複者。
 
 ---
 

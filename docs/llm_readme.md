@@ -1,234 +1,202 @@
-# LLM API 使用說明 Linux 版
+# LLM Pipeline 使用說明（新版）
 
-這份文件只說明如何在 Linux 上使用 API 版本測試本專案的 LLM layer。
+本文件依照 `docs/llm_pipeline.md` 更新，說明新版 LLM orchestration 流程與各檔案責任。
 
-## 執行流程
+核心原則：
+
+1. LLM 不直接執行 Python。
+2. LLM 先產生高階 `plan.md`，再透過迴圈逐步產生 `operation.json`。
+3. 所有實際執行都由 backend 負責，執行結果只寫入 `history.json`。
+
+## 新版流程總覽
 
 ```text
-testcase prompt
-  -> main.py 呼叫 LLM API
-  -> LLM 回傳 JSON operation plan
-  -> validator 檢查 op 和 args
-  -> dispatcher 呼叫 backend function
-  -> main.py 輸出 #RESPONSE / #END
+prompt + system context + skill.md + tool.md
+  -> LLM
+  -> plan.md
+
+plan.md + current-plan.md + history.json + skill.md + tool.md
+  -> LLM
+  -> operation.json
+  -> backend validate + execute
+  -> output
+  -> program append history.json
+  -> LLM update current-plan.md
+  -> next operation.json (loop)
 ```
 
-LLM 只負責產生 JSON operation，不會直接執行 Python code。
+簡化成一句話：
 
-範例 JSON：
+```text
+plan -> operation -> output -> history -> update plan -> next operation
+```
+
+## 快速執行（單次跑完整 testcase）
+
+在專案根目錄直接執行：
+
+```bash
+python3 main.py < testcase/test10/prompt.txt
+```
+
+這個用法會讓 `main.py` 依序讀取 `prompt.txt` 的每一行請求，並在同一次執行中輸出多個 `#RESPONSE ... #END` 區塊。
+
+執行後可在以下位置查看結果：
+
+- log：`output/log/test10.log`
+- 輸出 Verilog：`output/out_v/test10_out.v`
+
+## 各檔案責任
+
+- `prompt.txt`: 原始使用者需求（task data，不是 trusted system instruction）。
+- `skill.md`: LLM 的推理/拆解策略。
+- `tool.md`: 人類可讀的工具目錄，協助 LLM 選 operation。
+- `plan.md`: 第一次 LLM 呼叫產生的高階計畫，不直接執行。
+- `current-plan.md`: 每輪由 LLM 更新的進度狀態（已完成、待完成、下一步）。
+- `operation.json`: LLM 產生的具體指令，必須經 backend 驗證後才可執行。
+- `history.json`: 只能由程式寫入，記錄每次 operation 的真實執行結果。
+
+## `operation.json` 格式
+
+主要建議沿用現有執行介面：
 
 ```json
 {
   "operations": [
     {
-      "op": "load_design",
+      "op": "count_gates_of_type",
       "args": {
-        "path": "testcase/test01/test01.v"
-      }
-    },
-    {
-      "op": "write_design",
-      "args": {
-        "path": "test01_out.v"
+        "type": "NAND"
       }
     }
   ]
 }
 ```
 
-## 重要檔案
+也可接受單一 operation shorthand（由 backend 正規化）：
 
-| 檔案 | 功能 |
-| --- | --- |
-| `main.py` | stdin/stdout 主流程、config 讀取、LLM API 呼叫 |
-| `tools/llm_planner.py` | LLM catalog、JSON validator、dispatcher |
-| `testcase/test01/prompt.txt` | 最小 API 測試 prompt |
-
-## 基本準備
-
-進入專案目錄：
-
-```bash
-cd /path/to/EDA-Final-Project
+```json
+{
+  "op": "count_gates_of_type",
+  "args": {
+    "type": "NAND"
+  }
+}
 ```
 
-確認 Python 可用：
+backend 必須做：
 
-```bash
-python3 --version
+- JSON parse
+- operation 名稱與參數驗證
+- 拒絕未知 operation
+- 只呼叫已註冊 backend 函式
+
+## `history.json` 格式
+
+成功範例：
+
+```json
+[
+  {
+    "step": 1,
+    "operation": {
+      "op": "count_gates_of_type",
+      "args": {
+        "type": "NAND"
+      }
+    },
+    "status": "success",
+    "payload": {
+      "type": "NAND",
+      "count": 42
+    },
+    "text": "The design contains 42 NAND gates."
+  }
+]
 ```
 
-## 使用 OpenAI API 測試
+失敗範例（失敗也要寫入）：
 
-不要把 API key 寫進程式或 commit 到 repo。請用環境變數。
-
-```bash
-export OPENAI_API_KEY='你的 OpenAI API key'
+```json
+[
+  {
+    "step": 2,
+    "operation": {
+      "op": "get_gate_info",
+      "args": {
+        "gate": "U999"
+      }
+    },
+    "status": "error",
+    "error": "Unknown gate: U999"
+  }
+]
 ```
 
-建立 `config_openai.yml`：
-
-```bash
-cat > config_openai.yml <<'EOF'
-provider: openai
-openai:
-  model: 你的模型名稱
-  api_key_env: OPENAI_API_KEY
-generation:
-  temperature: 0
-  max_output_tokens: 4096
-  timeout: 60
-  strict: true
-EOF
-```
-
-把 `你的模型名稱` 換成帳號可用的 OpenAI model。
-
-執行 `test01`：
-
-```bash
-python3 main.py -config config_openai.yml < testcase/test01/prompt.txt
-```
-
-成功時應該看到三個 response：
+## 建議執行迴圈
 
 ```text
-#RESPONSE 1
-Acknowledged. Initialized testcase "test01". ...
-#END 1
-#RESPONSE 2
-Loaded gate-level Verilog from testcase/test01/test01.v successfully.
-...
-#END 2
-#RESPONSE 3
-Wrote the current design to "test01_out.v" successfully.
-#END 3
+1. 讀 prompt.txt / skill.md / tool.md
+2. LLM 產生 plan.md
+3. 初始化 current-plan.md = plan.md
+4. 初始化 history.json = []
+5. 重複：
+   a. LLM 讀 current-plan.md + history.json 產生 operation.json
+   b. backend validate + execute operation.json
+   c. 程式 append history.json
+   d. LLM 更新 current-plan.md
+   e. 若完成則停止
+6. 輸出最終結果
 ```
 
-確認輸出檔：
+## 停止條件
 
-```bash
-ls -lh test01_out.v test01.log
-```
+任一條件成立即可停止：
 
-## 使用 Anthropic API 測試
+- `current-plan.md` 包含 `Status: complete`
+- LLM 輸出特別 operation（例如 `final_answer`）
+- 達到 `max_iterations`
+- 連續錯誤超過門檻
 
-設定 API key：
-
-```bash
-export ANTHROPIC_API_KEY='你的 Anthropic API key'
-```
-
-建立 `config_anthropic.yml`：
-
-```bash
-cat > config_anthropic.yml <<'EOF'
-provider: anthropic
-anthropic:
-  model: 你的 Anthropic 模型名稱
-  api_key_env: ANTHROPIC_API_KEY
-generation:
-  temperature: 0
-  max_output_tokens: 4096
-  timeout: 60
-  strict: true
-EOF
-```
-
-執行：
-
-```bash
-python3 main.py -config config_anthropic.yml < testcase/test01/prompt.txt
-```
-
-## strict 模式
-
-建議測 API 時使用：
+建議初始設定：
 
 ```yaml
-strict: true
+llm:
+  pipeline_mode: true
+  max_pipeline_iterations: 10
 ```
 
-這樣 LLM API 失敗、JSON 格式錯誤、operation 不存在、缺少 args 時，程式會直接回報錯誤。
+## 與現有程式的關係
 
-如果改成：
+新版是「外層 orchestration loop」升級，不是重寫 backend：
 
-```yaml
-strict: false
-```
+- 保留 `tools/llm_planner.py` 的 operation catalog / validator / dispatcher。
+- 保留 `execute_plan(state, raw_plan)` 作為執行邊界。
+- 主要新增 `plan.md`、`current-plan.md`、`history.json` 三者之間的 LLM 迴圈。
 
-LLM 失敗時會 fallback 到目前的 rule-based parser。這對 demo 比較方便，但比較不容易看出是不是 LLM 本身失敗。
+## Pipeline 狀態檔案位置
 
-## 常見錯誤
-
-### API 沒有被使用
-
-確認執行時有加 `-config`：
-
-```bash
-python3 main.py -config config_openai.yml < testcase/test01/prompt.txt
-```
-
-如果沒有 `-config`，程式會只用 rule-based parser。
-
-### 找不到 `test01.v`
-
-錯誤：
+建議每個 testcase 使用獨立狀態目錄：
 
 ```text
-No such file or directory: 'test01.v'
+testcase/<case_name>/llm_state/
+  ├─ plan.md
+  ├─ current-plan.md
+  ├─ operation.json
+  └─ history.json
 ```
 
-目前 `load_design` 已補 fallback：如果已經知道 testcase 是 `test01`，找不到 `test01.v` 時會自動找：
+## Debug 建議
 
-```text
-testcase/test01/test01.v
-```
+建議每輪記錄：
 
-如果仍然發生，請確認第一個 response 成功初始化 testcase：
+- `plan.md` / `current-plan.md` / `operation.json` / `history.json` 寫入位置
+- 本輪執行 operation 名稱與參數
+- loop 停止原因（complete / max iterations / error threshold）
 
-```text
-Acknowledged. Initialized testcase "test01".
-```
+這樣可快速區分問題在：
 
-### 想確認 LLM 失敗原因
-
-把 config 設成：
-
-```yaml
-strict: true
-```
-
-這樣不會自動 fallback，比較容易 debug。
-
-## 目前已接到 API catalog 的 operation
-
-Design I/O：
-
-- `begin_testcase(case_name)`
-- `load_design(path)`
-- `write_design(path)`
-
-Fanin / fanout / cone：
-
-- `immediate_fanin_gates(gate_or_signal)`
-- `immediate_fanout_gates(gate_or_signal)`
-- `transitive_fanin_cone(target)`
-- `transitive_fanout_cone(source)`
-- `count_fanin_cone_gates(target)`
-- `count_fanout_cone_gates(source)`
-- `shared_fanin_cone_gates(target1, target2)`
-- `highest_fanout_signal()`
-- `highest_fanout_primary_input()`
-- `largest_fanin_cone_output()`
-
-Logic / formal：
-
-- `signals_equivalent(sig_a, sig_b)`
-- `output_always_constant(output, val)`
-- `output_depends_on_input(output, input)`
-- `derive_boolean_equation(output)`
-- `write_logic_expression(wire)`
-- `boolean_function_of_output(output)`
-- `function_symmetric(node, in_a, in_b)`
-- `exists_nand_pair_equivalent_to(wire)`
+- LLM 規劃（plan/update）
+- operation 產生
+- backend 驗證
+- backend 執行結果

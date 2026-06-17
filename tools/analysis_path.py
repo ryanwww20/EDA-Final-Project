@@ -709,52 +709,107 @@ def format_path_result(payload: dict) -> str:
 
 _NAME = r"([\w\[\]\.]+)"
 
+# Filler words that may precede a net/gate name in natural language, e.g.
+# "from input n12", "node n1127", "primary output n25[0]". They are consumed
+# (optionally) so the captured group is the actual net name.
+_FILLER = r"(?:primary\s+|the\s+)*(?:input|output|node|signal|wire|gate|net|pin|port)s?\s+"
+# A net name, tolerant of an optional leading filler word.
+_NM = rf"(?:{_FILLER})?([\w\[\]\.]+)"
+
+
+def _clean_name(name: str) -> str:
+    """Strip trailing sentence punctuation captured from natural language
+    (e.g. "n1127." -> "n1127"). Net names never end in these characters,
+    while bus indices like "n25[0]" end in ']' and are preserved."""
+    return name.rstrip(".,;:!?'\")") if name else name
+
+
+def _extract_pair(line: str):
+    """Extract a (src, dst) node pair from common NL connective phrasings."""
+    patterns = (
+        rf"from\s+{_NM}\s+(?:to|and)\s+{_NM}",
+        rf"connecting\s+{_NM}\s+(?:to|and|with|->|and to)\s+{_NM}",
+        rf"between\s+{_NM}\s+and\s+{_NM}",
+        rf"originating\s+(?:at|from|in)\s+{_NM}.*?terminating\s+(?:at|in|on)\s+{_NM}",
+        rf"starting\s+(?:at|from|in)\s+{_NM}.*?ending\s+(?:at|in|on)\s+{_NM}",
+    )
+    for pat in patterns:
+        if m := re.search(pat, line, re.I):
+            return _clean_name(m.group(1)), _clean_name(m.group(2))
+    return None
+
+
+def _extract_avoid(line: str):
+    """Extract the node a path must avoid, from 'avoiding X', 'without X',
+    'does not traverse/pass through X', etc."""
+    if m := re.search(
+        rf"(?:avoid(?:ing)?|without)\s+(?:passing\s+through\s+|traversing\s+|"
+        rf"going\s+through\s+)?{_NM}",
+        line, re.I,
+    ):
+        return _clean_name(m.group(1))
+    if m := re.search(
+        rf"(?:not|n't)\s+(?:traverse|traversing|pass(?:ing)?\s+through|"
+        rf"go(?:ing)?\s+through|visit(?:ing)?|cross(?:ing)?)\s+{_NM}",
+        line, re.I,
+    ):
+        return _clean_name(m.group(1))
+    return None
+
 
 def try_parse_path_request(line: str) -> dict | None:
     low = line.lower()
+    pair = _extract_pair(line)
 
-    # path existence, optionally avoiding a node
-    if m := re.search(
-        rf"path (?:exists?\s+)?from\s+{_NAME}\s+to\s+{_NAME}"
-        rf"(?:.*?avoid(?:ing)?\s+{_NAME})?", line, re.I
-    ):
-        if "avoid" in low or "without" in low:
-            am = re.search(rf"avoid(?:ing)?\s+{_NAME}", line, re.I)
-            avoid = am.group(1) if am else None
-            return {"op": "path_exists",
-                    "args": {"src": m.group(1), "dst": m.group(2), "avoid": avoid}}
-        if re.search(r"is there|does .* path|path exists", low):
-            return {"op": "path_exists",
-                    "args": {"src": m.group(1), "dst": m.group(2)}}
-
-    # enumerate paths
-    if m := re.search(rf"(?:enumerate|list all).*paths?\s+(?:from\s+)?{_NAME}\s+to\s+{_NAME}", line, re.I):
-        return {"op": "enumerate_paths",
-                "args": {"src": m.group(1), "dst": m.group(2)}}
-
-    # all paths pass through
-    if m := re.search(
-        rf"all paths from\s+{_NAME}\s+to\s+{_NAME}\s+(?:pass|go) through\s+{_NAME}",
-        line, re.I,
-    ):
-        return {"op": "all_paths_pass_through",
-                "args": {"src": m.group(1), "dst": m.group(2), "node": m.group(3)}}
+    # all paths pass through a node (must check before path_exists/depth)
+    if pair and re.search(r"\b(?:all|every|each)\b", low) \
+            and re.search(r"pass(?:es)?\s+through|go(?:es)?\s+through|"
+                          r"route[d]?\s+through|via", low):
+        node = None
+        if tm := re.search(
+            rf"(?:pass(?:es)?|go(?:es)?|route[d]?)\s+through\s+{_NM}", line, re.I
+        ):
+            node = _clean_name(tm.group(1))
+        elif tm := re.search(rf"\bvia\s+{_NM}", line, re.I):
+            node = _clean_name(tm.group(1))
+        if node is not None:
+            return {"op": "all_paths_pass_through",
+                    "args": {"src": pair[0], "dst": pair[1], "node": node}}
 
     # articulation points
-    if m := re.search(
-        rf"articulation points? (?:between|from)\s+{_NAME}\s+(?:and|to)\s+{_NAME}",
-        line, re.I,
-    ):
+    if pair and re.search(r"articulation point", low):
         return {"op": "articulation_points_between",
-                "args": {"src": m.group(1), "dst": m.group(2)}}
+                "args": {"src": pair[0], "dst": pair[1]}}
 
     # point-to-point depth
-    if m := re.search(
-        rf"(?:critical path|longest|maximum|max).*depth\s+(?:from\s+)?{_NAME}\s+to\s+{_NAME}",
-        line, re.I,
+    if pair and re.search(r"\bdepth\b|how\s+(?:deep|many\s+levels)|"
+                          r"\blevels?\b", low):
+        if "critical" in low:
+            op = "critical_path_depth"
+        elif "longest" in low:
+            op = "longest_comb_path_depth"
+        else:
+            op = "max_logic_depth"
+        return {"op": op, "args": {"src": pair[0], "dst": pair[1]}}
+
+    # enumerate paths
+    if pair and re.search(
+        r"enumerat|list\s+(?:all|every|each)|all\s+paths?|every\s+path|"
+        r"each\s+path|complete\s+(?:list|enumeration|set).*paths?|"
+        r"originating", low
     ):
-        op = "critical_path_depth" if "critical" in low else "max_logic_depth"
-        return {"op": op, "args": {"src": m.group(1), "dst": m.group(2)}}
+        return {"op": "enumerate_paths",
+                "args": {"src": pair[0], "dst": pair[1]}}
+
+    # path existence, optionally avoiding a node
+    if pair and re.search(
+        r"\bpath\b|connect|reach|exists?\b|is\s+there|does\s+.*\bpath\b", low
+    ):
+        avoid = _extract_avoid(line)
+        args = {"src": pair[0], "dst": pair[1]}
+        if avoid is not None:
+            args["avoid"] = avoid
+        return {"op": "path_exists", "args": args}
 
     # design-wide depth queries
     if re.search(r"(?:max|maximum|longest).*(?:pi|primary input).*(?:po|primary output)", low) \

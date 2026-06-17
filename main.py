@@ -71,6 +71,21 @@ from tools.verify_equivalence import (
     format_verify_result,
     try_parse_verify_request,
 )
+from tools.transform_fanout import (
+    dispatch_transform_fanout_op,
+    format_transform_fanout_result,
+    try_parse_transform_fanout_request,
+)
+from tools.transform_depth import (
+    dispatch_transform_depth_op,
+    format_transform_depth_result,
+    try_parse_transform_depth_request,
+)
+from tools.transform_cleanup import (
+    dispatch_transform_cleanup_op,
+    format_transform_cleanup_result,
+    try_parse_transform_cleanup_request,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -415,11 +430,29 @@ def handle_analysis(line, state):
 
 
 def handle_transform(line, state):
+    if state.netlist is None:
+        return "Error: no design loaded."
+
+    request = try_parse_transform_fanout_request(line)
+    if request is not None:
+        payload = dispatch_transform_fanout_op(state, request)
+        return format_transform_fanout_result(payload)
+
+    request = try_parse_transform_depth_request(line)
+    if request is not None:
+        payload = dispatch_transform_depth_op(state, request)
+        return format_transform_depth_result(payload)
+
+    request = try_parse_transform_cleanup_request(line)
+    if request is not None:
+        payload = dispatch_transform_cleanup_op(state, request)
+        return format_transform_cleanup_result(payload)
+
     request = try_parse_tool_request(line)
     if request is not None:
         results = execute_plan(state, request)
         return format_plan_results(results)
-    # TODO: call eda_ops.* transformation, then self-check (z3), then report.
+    # TODO: remaining transform families (cleanup, remap, depth opt).
     return "[transformation not implemented yet]"
 
 
@@ -467,10 +500,11 @@ def route_request(line, state):
     if re.search(r"\bwrite\b|\boutput the design\b", low):
         return handle_write(line, state)
     if re.search(
-        r"\b(depth|path|equivalent|equivalence|identical|constant|boolean|logic|"
-        r"symmetric|depend|always|cone|fanout|verify|exist|count|gates?|primary|"
+        r"\b(depth|paths?|equivalent|equivalence|identical|constant|boolean|logic|"
+        r"symmetric|depend|always|cone|fanout|verify|exists?|count|gates?|primary|"
         r"width|widths|type|reachable|driven|successors|dangling|floating|"
-        r"unconnected|redundant|tied|tie)\b",
+        r"unconnected|redundant|tied|tie|traverse|enumerat\w*|articulation|"
+        r"connect\w*|reach\w*|levels?)\b",
         low,
     ):
         return handle_analysis(line, state)
@@ -490,6 +524,11 @@ def main():
     state = State()
     state.config = load_config(args.config) if args.config else None
 
+    # PDF section 3.3 contract: read ONE request per stdin line, answer it with
+    # its own #RESPONSE <id> ... #END <id> block, and flush so the grader sends
+    # the next line. route_request() decides per line whether to run the LLM
+    # pipeline (which keeps its own plan/history records) or the keyword
+    # fallback; either way each line produces exactly one numbered response.
     rid = 0
     for line in sys.stdin:
         line = line.strip()
