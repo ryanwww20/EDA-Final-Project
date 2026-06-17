@@ -36,6 +36,16 @@ from tools.analysis_logic import (
     format_logic_result,
     try_parse_logic_request,
 )
+from tools.analysis_netlist_stats import (
+    dispatch_netlist_stats_op,
+    format_netlist_stats_result,
+    try_parse_netlist_stats_request,
+)
+from tools.analysis_path import (
+    dispatch_path_op,
+    format_path_result,
+    try_parse_path_request,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +314,11 @@ def handle_analysis(line, state):
     if state.netlist is None:
         return "Error: no design loaded."
 
+    request = try_parse_netlist_stats_request(line)
+    if request is not None:
+        payload = dispatch_netlist_stats_op(state.netlist, request)
+        return format_netlist_stats_result(payload)
+
     request = try_parse_fanin_fanout_request(line)
     if request is not None:
         payload = dispatch_fanin_fanout_op(state.netlist, request)
@@ -314,7 +329,11 @@ def handle_analysis(line, state):
         payload = dispatch_logic_op(state.netlist, request)
         return format_logic_result(payload)
 
-    # TODO: other analysis ops (max_depth, path_exists, ...)
+    request = try_parse_path_request(line)
+    if request is not None:
+        payload = dispatch_path_op(state.netlist, request)
+        return format_path_result(payload)
+
     return "[analysis not implemented yet]"
 
 
@@ -353,7 +372,8 @@ def route_request(line, state):
         return handle_write(line, state)
     if re.search(
         r"\b(depth|path|equivalent|equivalence|identical|constant|boolean|logic|"
-        r"symmetric|depend|always|cone|fanout|verify|exist)\b",
+        r"symmetric|depend|always|cone|fanout|verify|exist|count|gates?|primary|"
+        r"width|widths|type|reachable|driven|successors)\b",
         low,
     ):
         return handle_analysis(line, state)

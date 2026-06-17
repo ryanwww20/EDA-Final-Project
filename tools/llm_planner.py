@@ -24,10 +24,20 @@ from tools.analysis_logic import (
     format_logic_result,
     get_public_op_catalog as get_logic_catalog,
 )
+from tools.analysis_netlist_stats import (
+    dispatch_netlist_stats_op,
+    format_netlist_stats_result,
+    get_public_op_catalog as get_netlist_stats_catalog,
+)
+from tools.analysis_path import (
+    dispatch_path_op,
+    format_path_result,
+    get_public_op_catalog as get_path_catalog,
+)
 
 
-OperationHandler = Callable[[Any, dict[str, Any]], dict[str, Any]]
-OperationFormatter = Callable[[dict[str, Any]], str]
+OperationHandler = Callable[[Any, "dict[str, Any]"], "dict[str, Any]"]
+OperationFormatter = Callable[["dict[str, Any]"], str]
 
 
 def _handle_begin(state: Any, request: dict[str, Any]) -> dict[str, Any]:
@@ -93,6 +103,18 @@ def _handle_logic(state: Any, request: dict[str, Any]) -> dict[str, Any]:
     return dispatch_logic_op(state.netlist, request, public_only=True)
 
 
+def _handle_netlist_stats(state: Any, request: dict[str, Any]) -> dict[str, Any]:
+    if state.netlist is None:
+        raise ValueError("No design loaded.")
+    return dispatch_netlist_stats_op(state.netlist, request, public_only=True)
+
+
+def _handle_path(state: Any, request: dict[str, Any]) -> dict[str, Any]:
+    if state.netlist is None:
+        raise ValueError("No design loaded.")
+    return dispatch_path_op(state.netlist, request, public_only=True)
+
+
 def _format_passthrough(payload: dict[str, Any]) -> str:
     return str(payload["result"])
 
@@ -132,37 +154,6 @@ BASE_OP_TABLE: dict[str, dict[str, Any]] = {
 
 
 UNIMPLEMENTED_OPS: dict[str, dict[str, Any]] = {
-    "count_total_gates": {
-        "required_args": (),
-        "category": "netlist_stats",
-        "description": "Count all gates by type and total count.",
-    },
-    "path_exists": {
-        "required_args": ("src", "dst"),
-        "optional_args": ("avoid",),
-        "category": "path_depth_query",
-        "description": "Check whether a combinational path exists, optionally avoiding a node.",
-    },
-    "enumerate_paths": {
-        "required_args": ("src", "dst"),
-        "category": "path_depth_query",
-        "description": "Enumerate combinational paths between two nodes.",
-    },
-    "max_logic_depth": {
-        "required_args": ("src", "dst"),
-        "category": "path_depth_query",
-        "description": "Compute maximum logic depth between two nodes.",
-    },
-    "longest_comb_path_depth": {
-        "required_args": ("src", "dst"),
-        "category": "path_depth_query",
-        "description": "Compute longest combinational path depth between two nodes.",
-    },
-    "critical_path_depth": {
-        "required_args": ("src", "dst"),
-        "category": "path_depth_query",
-        "description": "Compute critical path depth between two nodes.",
-    },
     "count_gates_driven_by": {
         "required_args": ("gate",),
         "category": "graph_query",
@@ -219,21 +210,6 @@ UNIMPLEMENTED_OPS: dict[str, dict[str, Any]] = {
         "category": "transform_stats",
         "description": "Count BUF gates added by the last buffer insertion.",
     },
-    "max_pi_to_dff_d_depth": {
-        "required_args": (),
-        "category": "path_depth_query",
-        "description": "Compute maximum logic depth from any PI to any DFF D pin.",
-    },
-    "outputs_with_depth_gt": {
-        "required_args": ("n",),
-        "category": "path_depth_query",
-        "description": "List outputs whose logic depth is greater than n.",
-    },
-    "get_gate_info": {
-        "required_args": ("gate",),
-        "category": "netlist_stats",
-        "description": "Report a gate type and pin connections.",
-    },
 }
 
 
@@ -252,6 +228,8 @@ def get_operation_catalog(*, include_unimplemented: bool = False) -> list[dict[s
     catalog = [_catalog_entry(name, meta) for name, meta in BASE_OP_TABLE.items()]
     catalog.extend(get_fanin_fanout_catalog())
     catalog.extend(get_logic_catalog())
+    catalog.extend(get_netlist_stats_catalog())
+    catalog.extend(get_path_catalog())
     if include_unimplemented:
         catalog.extend(
             _catalog_entry(name, meta)
@@ -325,6 +303,23 @@ def _implemented_tables() -> dict[str, dict[str, Any]]:
             "description": meta["description"],
             "handler": _handle_logic,
             "formatter": format_logic_result,
+        }
+    for meta in get_netlist_stats_catalog():
+        table[meta["op"]] = {
+            "required_args": tuple(meta["required_args"]),
+            "category": meta["category"],
+            "description": meta["description"],
+            "handler": _handle_netlist_stats,
+            "formatter": format_netlist_stats_result,
+        }
+    for meta in get_path_catalog():
+        table[meta["op"]] = {
+            "required_args": tuple(meta["required_args"]),
+            "optional_args": tuple(meta.get("optional_args", ())),
+            "category": meta["category"],
+            "description": meta["description"],
+            "handler": _handle_path,
+            "formatter": format_path_result,
         }
     return table
 
