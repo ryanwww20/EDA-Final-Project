@@ -6,3 +6,4 @@ config_openai.yml
 testcase.zip
 *.pdf
 *.log
+.claude/

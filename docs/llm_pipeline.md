@@ -1,240 +1,181 @@
 # LLM Pipeline Design
 
-This document records the pipeline idea we want to change to first.
+This document records the new LLM pipeline architecture.
 
-In the diagram, every smiley face means one LLM call.
+Every input line is treated as one prompt round. Each round first asks a
+Planner LLM to create `plan.md`, then asks a Main LLM to either produce the
+final requested output or request one backend tool operation. Tool operation
+results are fed back to the Main LLM until the request is complete.
 
-The main idea is:
+## My Understanding
 
-1. The LLM should not directly execute Python.
-2. The LLM should read the user prompt, `skill.md`, and `tool.md`.
-3. The first LLM call should produce a high-level `plan.md`.
-4. After that, the LLM should repeatedly read the current plan state and ask the backend to execute one or more concrete operations.
-5. `operation.json` is the structured command format used to execute backend functions.
-6. `history.json` is written by the program, not by the LLM.
-7. `history.json` records the output after every operation.
-8. The LLM reads `history.json` to update its plan and decide the next operation.
+For each prompt line, the pipeline should run like this:
+
+1. Planner LLM reads:
+   - `EDA_skill.md`
+   - `EDA_tool.md`
+   - the current prompt line
+2. Planner LLM generates:
+   - `plan.md`
+3. Main LLM reads:
+   - `EDA_skill.md`
+   - `EDA_tool.md`
+   - the current prompt line
+   - `plan.md`
+   - `history.json`
+4. Main LLM chooses one of two outputs:
+   - Request output: the final answer/output requested by the user.
+   - Output operation: a structured tool call that the backend should execute.
+5. If Main LLM emits an Output operation:
+   - the backend validates and executes the tool call
+   - the backend returns real operation output
+   - the program appends this round's input/output to `history.json`
+   - Main LLM reads the tool output and updates `plan.md`
+   - the updated state feeds back into Main LLM for the next decision
+6. The loop stops when Main LLM emits Request output.
+
+Important note: the repository currently has `docs/EDA_skill.md` and
+`tools/tool.md`. It does not currently contain `EDA_tool.md`. The logical
+pipeline name is `EDA_tool.md`, but implementation must either create that file
+or map it to the existing tool catalog.
 
 ## Pipeline Overview
 
 ```text
-user prompt
-+ system context
-+ skill.md
-+ tool.md
+one prompt line
+  + EDA_skill.md
+  + EDA_tool.md
         |
         v
-      LLM
+  Planner LLM
         |
         v
      plan.md
 
 
-plan.md
-+ current-plan.md
-+ history.json
-+ system context
-+ skill.md
-+ tool.md
+one prompt line
+  + EDA_skill.md
+  + EDA_tool.md
+  + plan.md
+  + history.json
         |
         v
-      LLM
+    Main LLM
         |
-        v
- operation.json
-        |
-        v
- backend executes function
-        |
-        v
- output
-        |
-        v
- program appends history.json
-        |
-        v
-      LLM
-        |
-        v
- updates current-plan.md
+        +----------------------+
+        |                      |
+        v                      v
+ Request output        Output operation
+ final response        structured tool call
+                               |
+                               v
+                    backend validates + executes
+                               |
+                               v
+                         tool output
+                               |
+                               v
+                    program appends history.json
+                               |
+                               v
+                    Main LLM updates plan.md
+                               |
+                               v
+                         feedback loop
 ```
 
 Equivalent one-line view:
 
 ```text
-prompt + skill.md + tool.md
-  -> LLM
+prompt + EDA_skill.md + EDA_tool.md
+  -> Planner LLM
   -> plan.md
-  -> LLM reads plan.md + current-plan.md + history.json + skill.md + tool.md
-  -> operation.json
-  -> backend executes function
-  -> output
+  -> Main LLM reads prompt + EDA_skill.md + EDA_tool.md + plan.md + history.json
+  -> either Request output or Output operation
+  -> backend executes operation
   -> program writes history.json
-  -> LLM reads history.json
-  -> update current-plan.md
-  -> next operation.json
+  -> Main LLM updates plan.md
+  -> repeat until Request output
 ```
 
 ## File Responsibilities
 
-### `prompt.txt`
+### Prompt Line
 
-`prompt.txt` is the original natural-language testcase request.
+The prompt line is the original natural-language request from the user.
 
-It is user input. It should be treated as task data, not as trusted system instruction.
+It is task data. It should be treated as untrusted input, not as a system
+instruction.
 
-The first LLM call reads this file and converts the user request into a high-level plan.
+Each prompt line starts a new Planner LLM call. The program may keep previous
+runtime state, but the plan for the current request should be generated from
+the current prompt plus the EDA documents.
 
-### `skill.md`
+### `EDA_skill.md`
 
-`skill.md` describes how the LLM should reason for this project.
+`EDA_skill.md` describes how the LLM should reason for this project.
 
-It can explain planning strategy, decomposition rules, and how to use the EDA tools.
+It can define EDA task strategy, planning rules, transformation rules, and
+output conventions.
 
-It should guide the LLM, but the backend still validates every concrete operation before execution.
+Both Planner LLM and Main LLM should read this file.
 
-### `tool.md`
+### `EDA_tool.md`
 
-`tool.md` is the human-readable tool catalog.
+`EDA_tool.md` is the human-readable tool catalog.
 
-It tells the LLM which EDA operations exist and what each operation means.
+It tells the LLM which EDA operations exist, what each operation means, and how
+tool arguments should be chosen.
 
-The LLM can use `tool.md` to choose the correct operation, but the source of truth for execution must still be the backend operation catalog and validator.
+The LLM can use this file to choose operations, but the source of truth for
+execution must still be the backend operation catalog and validator.
 
 ### `plan.md`
 
-`plan.md` is generated by the first LLM call.
+`plan.md` is first generated by Planner LLM.
 
-It is a high-level task plan.
+It is later updated by Main LLM after real tool outputs arrive.
 
-It should describe:
+`plan.md` should record:
 
-- what the prompt is asking for
-- which information must be found
+- what the current prompt is asking for
+- which information is needed
 - which operations may be needed
 - dependencies between steps
-- expected final answer or final design output
-
-`plan.md` should not be directly executed.
-
-It is for reasoning and coordination only.
-
-### `current-plan.md`
-
-`current-plan.md` is the LLM-updated progress state.
-
-It is like the current working copy of `plan.md`.
-
-After each operation, the LLM reads the new `history.json` entry and updates `current-plan.md`.
-
-It should record:
-
+- what has already been learned from tool outputs
 - which steps are done
-- which steps are still pending
-- what was learned from the latest operation result
-- what the next operation should probably be
-- whether the task is ready for final output
+- which steps remain
+- whether the task is ready for Request output
 
-`current-plan.md` is useful because the LLM should not have to re-infer the entire task from scratch every time.
-
-### `operation.json`
-
-`operation.json` is the concrete backend command.
-
-It should be very close to how we currently execute each function.
-
-In the current codebase, this is closest to the JSON shape accepted by `tools/llm_planner.py`:
-
-```json
-{
-  "operations": [
-    {
-      "op": "count_gates_of_type",
-      "args": {
-        "type": "NAND"
-      }
-    }
-  ]
-}
-```
-
-For the new pipeline, we can also allow a single-operation shorthand internally:
-
-```json
-{
-  "op": "count_gates_of_type",
-  "args": {
-    "type": "NAND"
-  }
-}
-```
-
-The backend should normalize the single-operation form into:
-
-```json
-{
-  "operations": [
-    {
-      "op": "count_gates_of_type",
-      "args": {
-        "type": "NAND"
-      }
-    }
-  ]
-}
-```
-
-`operation.json` is LLM-generated, but it is not trusted.
-
-The backend must:
-
-- parse it as JSON
-- validate the operation name
-- validate required arguments
-- reject unknown or unsupported operations
-- execute only known backend functions
-- return structured output
-
-### `output`
-
-`output` is the result produced by executing `operation.json`.
-
-This may be:
-
-- an analysis answer
-- a transformation report
-- an error message
-- a final Verilog write result
-- an equivalence check result
-- any other backend function output
-
-The LLM should not invent this output.
-
-Only the backend should produce it.
+`plan.md` is reasoning state only. It is not directly executed.
 
 ### `history.json`
 
-`history.json` can be written only by the program.
+`history.json` is written only by the program.
 
-It is not written by the LLM.
+It records reliable runtime history so that Main LLM does not need to guess
+what happened.
 
-It is more like an execution log. It records every operation after execution so that the LLM can update its plan.
+The program should append entries for:
 
-The purpose of `history.json` is:
+- the current prompt input
+- the Main LLM decision
+- the operation requested, if any
+- the backend validation result
+- the backend execution output
+- any error that occurred
+- the final Request output, if the round is complete
 
-- record what operation was executed
-- record what arguments were used
-- record whether it succeeded or failed
-- record the backend output
-- give the LLM reliable memory for the next planning step
-- make debugging easier
+The LLM may read `history.json`, but it must not write it directly.
 
-Example:
+Suggested schema for a successful operation:
 
 ```json
 [
   {
     "step": 1,
+    "prompt": "How many NAND gates are in the design?",
+    "main_llm_output_type": "output_operation",
     "operation": {
       "op": "count_gates_of_type",
       "args": {
@@ -242,7 +183,7 @@ Example:
       }
     },
     "status": "success",
-    "output": {
+    "tool_output": {
       "type": "NAND",
       "count": 42
     },
@@ -251,12 +192,14 @@ Example:
 ]
 ```
 
-If an operation fails, the program should still append a history entry:
+Suggested schema for an operation error:
 
 ```json
 [
   {
     "step": 2,
+    "prompt": "Show information for gate U999.",
+    "main_llm_output_type": "output_operation",
     "operation": {
       "op": "get_gate_info",
       "args": {
@@ -269,380 +212,342 @@ If an operation fails, the program should still append a history entry:
 ]
 ```
 
-The important part is that `history.json` reflects real execution, not LLM guesses.
+Suggested schema for final output:
 
-## Why This Pipeline Is Good
+```json
+[
+  {
+    "step": 3,
+    "prompt": "How many NAND gates are in the design?",
+    "main_llm_output_type": "request_output",
+    "status": "success",
+    "request_output": "The design contains 42 NAND gates."
+  }
+]
+```
 
-This pipeline separates responsibilities clearly.
+## Main LLM Output Types
 
-The LLM is responsible for:
+Main LLM must emit exactly one of these two output types per iteration.
 
-- understanding the prompt
-- making a plan
-- choosing the next operation
-- reading history
-- updating the current plan
-- deciding when the final answer is ready
+### A. Request Output
+
+Request output is the final answer or final generated artifact requested by the
+prompt.
+
+Use this when Main LLM already has enough information from:
+
+- the prompt
+- `EDA_skill.md`
+- `EDA_tool.md`
+- `plan.md`
+- `history.json`
+- previous tool outputs
+
+Request output stops the feedback loop for the current prompt.
+
+Suggested structured form:
+
+```json
+{
+  "type": "request_output",
+  "output": "The design contains 42 NAND gates."
+}
+```
+
+### B. Output Operation
+
+Output operation is a request for the backend to execute one tool call.
+
+Use this when Main LLM needs real information from the design or needs to
+perform a concrete backend action.
+
+Suggested structured form:
+
+```json
+{
+  "type": "output_operation",
+  "operation": {
+    "op": "count_gates_of_type",
+    "args": {
+      "type": "NAND"
+    }
+  }
+}
+```
+
+The backend must validate this before execution.
+
+The LLM should not directly execute Python, shell commands, or arbitrary code.
+
+## Backend Responsibilities
 
 The program/backend is responsible for:
 
-- validating `operation.json`
-- executing real functions
-- producing real output
-- writing `history.json`
-- keeping the netlist state
+- reading and writing state files
+- validating Main LLM JSON output
+- validating operation names and arguments
+- executing only known backend functions
+- producing real tool output
+- appending `history.json`
+- preserving design/netlist runtime state
 - preventing invalid or unsafe operations
 
-This is better than asking the LLM to solve everything in one step because many testcase prompts require multiple operations.
+The backend should reject:
 
-For example, a prompt might require:
+- unknown operation names
+- malformed JSON
+- missing required arguments
+- unsupported argument values
+- attempts to execute arbitrary code
 
-1. inspect the current netlist
-2. find a target gate or signal
-3. run a transformation
-4. count the inserted or removed gates
-5. verify equivalence
-6. write the final design
+## Main LLM Feedback Loop
 
-One LLM call may not know all later steps until it sees earlier operation results.
+After an Output operation, the result must feed back into Main LLM.
 
-So the loop should be:
+Main LLM should then:
+
+1. read the latest tool output
+2. read the updated `history.json`
+3. update `plan.md` according to what was learned
+4. decide whether another Output operation is needed
+5. emit Request output when the prompt is fully answered
+
+This creates the loop:
 
 ```text
-plan -> operation -> output -> history -> update plan -> next operation
+Main LLM
+  -> Output operation
+  -> backend output
+  -> history.json append
+  -> Main LLM updates plan.md
+  -> Main LLM
 ```
 
 ## Suggested Execution Loop
 
-The new runtime loop should look like this:
+The runtime loop should look like this:
 
 ```text
-1. Read prompt.txt.
-2. Read skill.md.
-3. Read tool.md or backend operation catalog.
-4. Ask LLM to create plan.md.
-5. Initialize current-plan.md from plan.md.
-6. Initialize history.json as an empty list.
-7. Repeat:
-   a. Ask LLM to read current-plan.md, history.json, skill.md, and tool.md.
-   b. Ask LLM to produce operation.json.
-   c. Validate operation.json.
-   d. Execute the operation through the backend dispatcher.
-   e. Append the real result to history.json.
-   f. Ask LLM to update current-plan.md.
-   g. Stop if current-plan.md says the task is complete, or if the LLM emits a final-answer operation.
-8. Produce the final response or final output file.
+For each input prompt line:
+  1. Read prompt line.
+  2. Read EDA_skill.md.
+  3. Read EDA_tool.md.
+  4. Ask Planner LLM to generate plan.md.
+  5. Ensure history.json exists.
+  6. Repeat:
+     a. Ask Main LLM to read prompt, EDA_skill.md, EDA_tool.md,
+        plan.md, and history.json.
+     b. Main LLM emits either Request output or Output operation.
+     c. If Request output:
+        - append final output to history.json
+        - return the output to the user
+        - stop this prompt round
+     d. If Output operation:
+        - validate the operation
+        - execute the backend tool
+        - append the real result to history.json
+        - ask Main LLM to update plan.md using the tool output
+        - continue the loop
+  7. Stop with an error if max iterations is reached.
 ```
 
-## Operation Granularity
-
-`operation.json` should usually contain one operation at a time.
-
-This makes the feedback loop cleaner:
-
-- one operation produces one result
-- one result becomes one history entry
-- the LLM can update the plan after every real observation
-
-Small ordered batches can be allowed later, but the first implementation should prefer one operation per loop.
-
-## Relationship To Current Code
-
-The current code already has a useful foundation:
-
-- `main.py` owns the I/O loop and LLM API call.
-- `tools/llm_planner.py` owns the operation catalog.
-- `tools/llm_planner.py` validates JSON plans.
-- `tools/llm_planner.py` dispatches operations to backend functions.
-- `execute_plan(state, raw_plan)` already executes a JSON operation list.
-
-The current flow is roughly:
-
-```text
-user line -> LLM -> JSON plan -> execute_plan() -> formatted output
-```
-
-The desired flow is:
-
-```text
-prompt -> LLM -> plan.md
-plan.md + current-plan.md + history.json -> LLM -> operation.json
-operation.json -> execute_plan()
-execute_plan() result -> program appends history.json
-history.json -> LLM -> update current-plan.md
-```
-
-So we do not need to throw away the current backend.
-
-We should keep `validate_plan()` and `execute_plan()` as the execution boundary.
-
-The main change is adding a higher-level LLM orchestration loop around them.
-
-## Code Implementation Plan
-
-### Phase 1: Add Pipeline State Files
-
-Add a small pipeline workspace for each testcase.
-
-Suggested location:
-
-```text
-testcase/<case_name>/llm_state/
-```
-
-Suggested files:
-
-```text
-testcase/<case_name>/llm_state/plan.md
-testcase/<case_name>/llm_state/current-plan.md
-testcase/<case_name>/llm_state/operation.json
-testcase/<case_name>/llm_state/history.json
-```
-
-Implementation tasks:
-
-1. Add helper functions in a new module such as `tools/llm_pipeline.py`.
-2. Implement `get_pipeline_dir(state)`.
-3. Implement `read_text(path, default="")`.
-4. Implement `write_text(path, content)`.
-5. Implement `read_history(path)`.
-6. Implement `append_history(path, entry)`.
-7. Ensure `history.json` starts as `[]`.
-
-### Phase 2: Create The Initial Plan
-
-Add a function:
-
-```python
-def request_llm_high_level_plan(prompt_text, state):
-    ...
-```
-
-This function should send the LLM:
-
-- user prompt
-- case name
-- design summary if a netlist is loaded
-- `skill.md`
-- `tool.md`
-- backend operation catalog summary if useful
-
-The LLM should return Markdown only.
-
-The program writes the result to:
-
-```text
-plan.md
-current-plan.md
-```
-
-At this phase, `plan.md` and `current-plan.md` can start identical.
-
-### Phase 3: Generate `operation.json`
-
-Add a function:
-
-```python
-def request_llm_next_operation(state, current_plan, history):
-    ...
-```
-
-This function should send the LLM:
-
-- `current-plan.md`
-- `history.json`
-- `skill.md`
-- `tool.md`
-- backend operation catalog
-
-The LLM must return JSON only.
-
-The expected schema should remain compatible with `validate_plan()`:
-
-```json
-{
-  "operations": [
-    {
-      "op": "operation_name",
-      "args": {}
-    }
-  ]
-}
-```
-
-The program writes the raw JSON to:
-
-```text
-operation.json
-```
-
-Then the program calls:
-
-```python
-results = execute_plan(state, operation_json)
-```
-
-### Phase 4: Append `history.json`
-
-After `execute_plan()` returns, append one entry per executed operation.
-
-Suggested schema:
-
-```json
-{
-  "step": 1,
-  "operation": {
-    "op": "count_gates_of_type",
-    "args": {
-      "type": "NAND"
-    }
-  },
-  "status": "success",
-  "payload": {},
-  "text": "human-readable result"
-}
-```
-
-If execution raises an exception, append:
-
-```json
-{
-  "step": 1,
-  "operation": {
-    "op": "count_gates_of_type",
-    "args": {
-      "type": "NAND"
-    }
-  },
-  "status": "error",
-  "error": "error message"
-}
-```
-
-This means the LLM can see failures and choose a corrected operation.
-
-### Phase 5: Update `current-plan.md`
-
-Add a function:
-
-```python
-def request_llm_update_current_plan(state, current_plan, history):
-    ...
-```
-
-This function should send:
-
-- previous `current-plan.md`
-- latest `history.json`
-- original `plan.md`
-- original prompt
-
-The LLM should return updated Markdown.
-
-The program writes it to:
-
-```text
-current-plan.md
-```
-
-The updated current plan should include a completion marker, for example:
-
-```text
-Status: in_progress
-```
-
-or:
-
-```text
-Status: complete
-```
-
-### Phase 6: Add Stop Conditions
-
-The loop should stop when one of these is true:
-
-- `current-plan.md` says `Status: complete`
-- the LLM emits a special operation such as `final_answer`
-- a maximum iteration count is reached
-- repeated errors happen too many times
-
-Suggested first implementation:
+Suggested first maximum:
 
 ```python
 max_iterations = 10
 ```
 
-This avoids infinite loops.
+## Operation Granularity
 
-### Phase 7: Integrate With `main.py`
+Main LLM should usually emit one Output operation at a time.
 
-Add a config option:
+This keeps the feedback loop clear:
 
-```yaml
-llm:
-  pipeline_mode: true
-  max_pipeline_iterations: 10
-```
+- one operation produces one backend result
+- one backend result becomes one history entry
+- Main LLM updates `plan.md` after every real observation
 
-When `pipeline_mode` is false, keep the current behavior:
+Small ordered batches can be added later, but the first implementation should
+prefer one operation per loop.
+
+## Relationship To Current Code
+
+The current code already has useful pieces:
+
+- `main.py` owns the user I/O loop and LLM API call.
+- `tools/llm_planner.py` owns the operation catalog.
+- `tools/llm_planner.py` validates JSON operation plans.
+- `tools/llm_planner.py` dispatches operations to backend functions.
+- `tools/llm_pipeline.py` already contains state-file orchestration helpers.
+
+The old flow is roughly:
 
 ```text
-user line -> LLM -> JSON plan -> execute_plan()
+user line -> LLM -> JSON operation plan -> execute_plan() -> formatted output
 ```
 
-When `pipeline_mode` is true, use:
+The new desired flow is:
 
 ```text
-user line -> plan.md -> operation loop -> final output
+user line
+  -> Planner LLM reads EDA_skill.md + EDA_tool.md + prompt
+  -> plan.md
+  -> Main LLM reads EDA_skill.md + EDA_tool.md + prompt + plan.md + history.json
+  -> Request output or Output operation
+  -> execute_plan() for Output operation
+  -> program appends history.json
+  -> Main LLM updates plan.md
+  -> repeat
 ```
 
-This lets us test the new pipeline without breaking the old one.
+The backend execution boundary should remain `validate_plan()` and
+`execute_plan()` or an equivalent normalized operation dispatcher.
+
+## Implementation Plan
+
+### Phase 1: Align State Files
+
+Use a per-testcase or per-session workspace.
+
+Suggested files:
+
+```text
+llm_state/plan.md
+llm_state/history.json
+llm_state/operation.json
+llm_state/debug.log
+```
+
+`current-plan.md` is no longer required as a core file. Main LLM should update
+`plan.md` directly.
+
+### Phase 2: Planner LLM
+
+Add or update a function like:
+
+```python
+def request_llm_plan(prompt_text, skill_text, tool_text):
+    ...
+```
+
+This function sends:
+
+- `EDA_skill.md`
+- `EDA_tool.md`
+- current prompt line
+
+The return value is Markdown only and is written to `plan.md`.
+
+### Phase 3: Main LLM Decision
+
+Add or update a function like:
+
+```python
+def request_llm_main_decision(prompt_text, plan_text, history, skill_text, tool_text):
+    ...
+```
+
+This function sends:
+
+- `EDA_skill.md`
+- `EDA_tool.md`
+- current prompt line
+- `plan.md`
+- `history.json`
+
+The return value must be JSON with `type` equal to either:
+
+- `request_output`
+- `output_operation`
+
+### Phase 4: Execute Output Operation
+
+When Main LLM returns `output_operation`, normalize it to the existing backend
+shape:
+
+```json
+{
+  "operations": [
+    {
+      "op": "count_gates_of_type",
+      "args": {
+        "type": "NAND"
+      }
+    }
+  ]
+}
+```
+
+Then validate and execute it through the backend dispatcher.
+
+### Phase 5: Append `history.json`
+
+After every Main LLM decision, append a program-generated history entry.
+
+For `output_operation`, include:
+
+- prompt
+- operation
+- status
+- tool output or error
+
+For `request_output`, include:
+
+- prompt
+- final output
+- status
+
+### Phase 6: Update `plan.md`
+
+After every successful or failed tool operation, ask Main LLM to update
+`plan.md`.
+
+The update prompt should include:
+
+- original prompt
+- previous `plan.md`
+- latest operation
+- latest tool output or error
+- `history.json`
+
+The returned Markdown replaces `plan.md`.
+
+### Phase 7: Stop Conditions
+
+The loop should stop when:
+
+- Main LLM emits `request_output`
+- maximum iteration count is reached
+- repeated tool errors exceed a configured limit
+- Main LLM output cannot be parsed after retry
 
 ### Phase 8: Tests
 
-Add unit tests for:
+Add tests for:
 
-- `history.json` initialization
-- appending successful operation history
-- appending error operation history
-- normalizing single-operation JSON
-- rejecting invalid `operation.json`
-- stopping after max iterations
-
-Add smoke tests for:
-
-- one simple analysis prompt
-- one prompt requiring multiple operations
-- one operation failure followed by a corrected operation
-
-### Phase 9: Debug Output
-
-For debugging, print or log:
-
-- where `plan.md` was written
-- where `current-plan.md` was written
-- where `operation.json` was written
-- where `history.json` was written
-- which operation was executed in each iteration
-- whether the loop stopped because of completion or max iterations
-
-This will make it much easier to inspect LLM behavior.
+- Planner LLM creates `plan.md`
+- Main LLM can emit `request_output`
+- Main LLM can emit `output_operation`
+- operation JSON is normalized for the existing backend
+- `history.json` is appended by the program, not the LLM
+- Main LLM updates `plan.md` after tool output
+- loop stops after final Request output
+- loop stops after max iterations
 
 ## First Minimal Version
 
-The first minimal version should implement only this:
+The first minimal implementation should be:
 
 ```text
-prompt -> plan.md
-plan.md + history.json -> operation.json
-operation.json -> execute_plan()
-append history.json
-update current-plan.md
-repeat until complete or max_iterations
+prompt
+  -> Planner LLM writes plan.md
+  -> Main LLM emits output_operation
+  -> backend executes one operation
+  -> program appends history.json
+  -> Main LLM updates plan.md
+  -> Main LLM emits request_output
 ```
 
-It does not need to solve every testcase immediately.
-
-The goal of the first version is to make the control flow visible and debuggable.
-
-After that works, we can improve prompts, completion detection, batching, and final-answer formatting.
+This is enough to prove the new architecture before improving prompts,
+multi-step planning, retries, and final output formatting.

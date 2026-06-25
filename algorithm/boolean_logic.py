@@ -189,6 +189,7 @@ class BDDManager:
         self._not_cache: dict[int, int] = {}
         self._apply_cache: dict[tuple[str, int, int], int] = {}
         self._restrict_cache: dict[tuple[int, str, bool], int] = {}
+        self._expr_cache: dict[BoolExpr, int] = {}
 
     def _ensure_var(self, name: str) -> None:
         if name not in self.var_order:
@@ -300,11 +301,13 @@ class BDDManager:
         return reduce(lambda a, b: self.apply(op, a, b), items)
 
     def from_expr(self, expr: BoolExpr) -> int:
-        memo: dict[BoolExpr, int] = {}
+        if expr in self._expr_cache:
+            return self._expr_cache[expr]
 
         def build(node: BoolExpr) -> int:
-            if node in memo:
-                return memo[node]
+            cached = self._expr_cache.get(node)
+            if cached is not None:
+                return cached
             if node.op == "const":
                 result = 1 if node.value else 0
             elif node.op == "var":
@@ -315,10 +318,12 @@ class BDDManager:
                 result = self.fold(node.op, (build(child) for child in node.args))
             else:
                 raise ValueError(f"Unsupported expression op: {node.op}")
-            memo[node] = result
+            self._expr_cache[node] = result
             return result
 
-        return build(expr)
+        root = build(expr)
+        self._expr_cache[expr] = root
+        return root
 
     def restrict(self, node_id: int, name: str, value: bool) -> int:
         key = (node_id, name, bool(value))

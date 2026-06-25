@@ -297,6 +297,83 @@ def _struct_key(g: Gate):
     return (g.type, ins)
 
 
+_LOGIC_GATES = {"and", "or", "nand", "nor", "xor", "xnor", "not", "buf"}
+
+
+def _const_bdd(net: str) -> int:
+    return 1 if net.endswith("1") else 0
+
+
+def _leaf_support(netlist: Netlist, net: str,
+                  cache: dict[str, frozenset[str]]) -> frozenset[str]:
+    if net in cache:
+        return cache[net]
+    if _is_const(net):
+        cache[net] = frozenset()
+        return cache[net]
+    if net in netlist.inputs:
+        cache[net] = frozenset({net})
+        return cache[net]
+    drv = netlist.unique_driver(net)
+    if not drv:
+        cache[net] = frozenset({net})
+        return cache[net]
+    gate = netlist.gates.get(drv)
+    if gate is None or gate.type == "dff":
+        cache[net] = frozenset({net})
+        return cache[net]
+    sup: set[str] = set()
+    for inp in gate.ins:
+        sup |= _leaf_support(netlist, inp, cache)
+    cache[net] = frozenset(sup)
+    return cache[net]
+
+
+def _gate_bdd_node(manager: Any, gate_type: str, ins: list[int]) -> int:
+    gtype = gate_type.lower()
+    if gtype == "buf":
+        return ins[0] if ins else 0
+    if gtype == "not":
+        return manager.negate(ins[0] if ins else 0)
+    if gtype == "and":
+        return manager.fold("and", ins)
+    if gtype == "or":
+        return manager.fold("or", ins)
+    if gtype == "xor":
+        return manager.fold("xor", ins)
+    if gtype == "nand":
+        return manager.negate(manager.fold("and", ins))
+    if gtype == "nor":
+        return manager.negate(manager.fold("or", ins))
+    if gtype == "xnor":
+        return manager.negate(manager.fold("xor", ins))
+    raise ValueError(f"Unsupported Boolean gate type: {gate_type}")
+
+
+def _signal_bdd(manager: Any, netlist: Netlist, net: str,
+                cache: dict[str, int]) -> int:
+    if net in cache:
+        return cache[net]
+    if _is_const(net):
+        cache[net] = _const_bdd(net)
+        return cache[net]
+    if net in netlist.inputs:
+        cache[net] = manager.var(net)
+        return cache[net]
+    drv = netlist.unique_driver(net)
+    if not drv:
+        cache[net] = manager.var(net)
+        return cache[net]
+    gate = netlist.gates.get(drv)
+    if gate is None or gate.type == "dff":
+        cache[net] = manager.var(net)
+        return cache[net]
+    ins_bdd = [_signal_bdd(manager, netlist, inp, cache) for inp in gate.ins]
+    node = _gate_bdd_node(manager, gate.type, ins_bdd)
+    cache[net] = node
+    return node
+
+
 def merge_structural_duplicate_gates(netlist: Netlist) -> dict[str, Any]:
     """Merge gates with identical type and inputs into one, to a fixpoint."""
     merged = 0
@@ -332,44 +409,56 @@ def merge_functionally_equivalent_gates(
     first (cheap), then a BDD pass over signals with small support."""
     struct = merge_structural_duplicate_gates(netlist)["merged"]
 
-    from tools.analysis_logic import build_logic_context
-    from algorithm.boolean_logic import expr_support, bdd_equivalent
+    from algorithm.boolean_logic import BDDManager
 
-    ctx = build_logic_context(netlist)
-    buckets: dict[tuple, list[str]] = defaultdict(list)
-    sig_expr: dict[str, Any] = {}
-    for g in list(netlist.gates.values()):
-        if g.type == "dff" or not g.out or g.out in netlist.outputs:
+    support_cache: dict[str, frozenset[str]] = {}
+    buckets: dict[tuple[str, ...], list[str]] = defaultdict(list)
+    for g in netlist.gates.values():
+        if g.type == "dff" or g.type not in _LOGIC_GATES or not g.out:
             continue
-        try:
-            expr = ctx.expr_for_signal(g.out)
-        except Exception:
+        if g.out in netlist.outputs:
             continue
-        support = expr_support(expr)
-        if len(support) > max_support or not support:
+        support = _leaf_support(netlist, g.out, support_cache)
+        if not support or len(support) > max_support:
             continue
-        sig_expr[g.out] = expr
         buckets[tuple(sorted(support))].append(g.out)
 
     merged = 0
-    for _support, sigs in buckets.items():
+    for support, sigs in buckets.items():
         if len(sigs) < 2:
             continue
-        reps: list[str] = []                       # canonical signals seen so far
+
+        manager = BDDManager(support)
+        bdd_cache: dict[str, int] = {}
+        canon_of_node: dict[int, str] = {}
+        removed_gate_names: list[str] = []
+
         for sig in sigs:
-            if netlist.unique_driver(sig) is None:
+            drv = netlist.unique_driver(sig)
+            if drv is None:
                 continue
-            match = next((r for r in reps
-                          if bdd_equivalent(sig_expr[sig], sig_expr[r])), None)
-            if match is not None and sig not in netlist.outputs:
-                drv = netlist.unique_driver(sig)
-                _replace_consumers(netlist, sig, match)
-                if drv in netlist.gates:
-                    del netlist.gates[drv]
-                merged += 1
-            else:
-                reps.append(sig)
-        _reindex(netlist)
+            try:
+                node_id = _signal_bdd(manager, netlist, sig, bdd_cache)
+            except Exception:
+                continue
+
+            canon = canon_of_node.get(node_id)
+            if canon is None:
+                canon_of_node[node_id] = sig
+                continue
+            if sig in netlist.outputs:
+                continue
+
+            _replace_consumers(netlist, sig, canon)
+            removed_gate_names.append(drv)
+            merged += 1
+
+        for drv in removed_gate_names:
+            if drv in netlist.gates:
+                del netlist.gates[drv]
+        if removed_gate_names:
+            _reindex(netlist)
+
     removed = _dead_gate_elim(netlist)
     _reindex(netlist)
     return {"op": "merge_functionally_equivalent_gates",

@@ -36,7 +36,7 @@ plan -> operation -> output -> history -> update plan -> next operation
 在專案根目錄直接執行：
 
 ```bash
-python3 main.py < testcase/test10/prompt.txt
+python3 main.py test**
 ```
 
 這個用法會讓 `main.py` 依序讀取 `prompt.txt` 的每一行請求，並在同一次執行中輸出多個 `#RESPONSE ... #END` 區塊。

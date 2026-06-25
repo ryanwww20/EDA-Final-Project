@@ -620,7 +620,9 @@ def format_analysis_result(payload: dict[str, Any]) -> str:
         label = "fanin" if "fanin" in op else "fanout"
         return f"Count ({label} cone gates): {result}"
     if isinstance(result, list):
-        return f"{op}: {result}"
+        from tools.history_compact import format_list_preview
+
+        return f"{op} ({len(result)}): {format_list_preview(result)}"
     if isinstance(result, tuple) and result and isinstance(result[0], str):
         return f"{op}: {result}"
     if isinstance(result, dict):

@@ -1,218 +1,151 @@
-# EDA tools
+# EDA Tools — LLM Command Reference
 
-# Request Type
+The LLM reads this table to translate a user's natural-language request into operations. Respond with JSON:
+
+```json
+{"operations": [{"op": "<op_name>", "args": {<args>}}]}
+```
+
+Split a multi-step request into ordered operations. Use signal / gate / file names exactly as written in the request. Each tool below lists what it does and an example command.
+
 
 ## Basic Operation
 
----
+- `begin_testcase(case_name)` — Start a new testcase; set its name (used for the log file). Command: `{"op": "begin_testcase", "args": {"case_name": "test01"}}`
+- `load_design(path)` — Load a gate-level netlist from a .v file as the current design. Command: `{"op": "load_design", "args": {"path": "testcase/test01/test01.v"}}`
+- `write_design(path)` — Write the current design to a Verilog file under output/out_v/. Command: `{"op": "write_design", "args": {"path": "test01_out.v"}}`
 
-1. Read Design
-2. Output Design to a file
+## 1.1 Gate / Netlist statistics
 
-## Analysis
+- `count_fanin_cone_gates(output)` — Number of gates in a primary output's fanin cone. Command: `{"op": "count_fanin_cone_gates", "args": {"output": "n15"}}`
+- `max_fanin_cone_depth(output)` — Maximum logic depth of an output's fanin cone. Command: `{"op": "max_fanin_cone_depth", "args": {"output": "n15"}}`
+- `count_total_gates()` — Total gate count, broken down by gate type. Command: `{"op": "count_total_gates", "args": {}}`
+- `count_gates_by_type_in_cone(output)` — Per-type gate count inside an output's fanin cone. Command: `{"op": "count_gates_by_type_in_cone", "args": {"output": "n15"}}`
+- `count_gates_of_type(type)` — Total count of gates of a given type. Command: `{"op": "count_gates_of_type", "args": {"type": "nand"}}`
+- `count_primary_inputs_outputs()` — Number of primary inputs and outputs. Command: `{"op": "count_primary_inputs_outputs", "args": {}}`
+- `list_primary_inputs_with_widths()` — List primary inputs with their bit widths. Command: `{"op": "list_primary_inputs_with_widths", "args": {}}`
+- `list_primary_outputs_with_widths()` — List primary outputs with their bit widths. Command: `{"op": "list_primary_outputs_with_widths", "args": {}}`
+- `get_gate_info(gate)` — Type and pin connections of a gate. Command: `{"op": "get_gate_info", "args": {"gate": "g0"}}`
+- `list_gates_of_type(type)` — List all gates of a given type. Command: `{"op": "list_gates_of_type", "args": {"type": "xor"}}`
+- `list_nand_gates_with_pins()` — List all NAND gates with their I/O signals. Command: `{"op": "list_nand_gates_with_pins", "args": {}}`
 
----
+## 1.2 Fanin / Fanout / Cone analysis
 
-### **1.1 Gate / Netlist 統計**
+- `query_input_fanout(input)` — Gates directly driven by a primary input (its fanout). Command: `{"op": "query_input_fanout", "args": {"input": "n5"}}`
+- `count_gates_driven_by(gate)` — How many gates a gate drives directly. Command: `{"op": "count_gates_driven_by", "args": {"gate": "g0"}}`
+- `list_immediate_successors(gate)` — Immediate successor gates of a gate. Command: `{"op": "list_immediate_successors", "args": {"gate": "g0"}}`
+- `transitive_fanin_cone(output)` — All gates in the full fanin cone. Command: `{"op": "transitive_fanin_cone", "args": {"output": "n15"}}`
+- `transitive_fanout_cone(input)` — All gates in the full fanout cone. Command: `{"op": "transitive_fanout_cone", "args": {"input": "n5"}}`
+- `gates_reachable_from(node)` — Gates reachable from a node along the fanout direction. Command: `{"op": "gates_reachable_from", "args": {"node": "g0"}}`
+- `shared_fanin_cone_gates(out1, out2)` — Gates shared by two outputs' fanin cones. Command: `{"op": "shared_fanin_cone_gates", "args": {"out1": "n15", "out2": "n16"}}`
+- `gates_connected_to_output(gate)` — Load gates connected to a gate's output. Command: `{"op": "gates_connected_to_output", "args": {"gate": "g0"}}`
+- `gates_driven_by_signal(wire)` — Gates driven directly by a signal. Command: `{"op": "gates_driven_by_signal", "args": {"wire": "n5"}}`
+- `deepest_fanin_cone_output()` — Primary output with the deepest fanin cone. Command: `{"op": "deepest_fanin_cone_output", "args": {}}`
+- `largest_fanin_cone_output()` — Primary output with the largest fanin cone. Command: `{"op": "largest_fanin_cone_output", "args": {}}`
+- `highest_fanout_primary_input()` — Primary input with the highest fanout. Command: `{"op": "highest_fanout_primary_input", "args": {}}`
+- `max_fanout_of_signal(wire)` — Current maximum fanout of a signal. Command: `{"op": "max_fanout_of_signal", "args": {"wire": "n5"}}`
 
-- Table
-    
-    
-    | **Tool** | **說明** | **首次出現** |
-    | --- | --- | --- |
-    | `count_fanin_cone_gates(output)` | fanin cone 內 gate 數 | test03 |
-    | `max_fanin_cone_depth(output)` | fanin cone 最大 logic depth | test04 |
-    | `count_total_gates()` | 總 gate 數（與 by-type 重疊） | test20 |
-    | `count_gates_by_type_in_cone(output)` | 某 output cone 內各 gate 類型數 | test37, test38 |
-    | `count_gates_of_type(type)` | 某類 gate 總數 | test32, test33, test34, test39, test40 |
-    | `count_primary_inputs_outputs()` | PI / PO 數量 | test32, test37 |
-    | `list_primary_inputs_with_widths()` | 列出 PI 與 bit width | test33, test39 |
-    | `list_primary_outputs_with_widths()` | 列出 PO 與 bit width | test37, test40 |
-    | `get_gate_info(gate)` | gate 類型 + pin 連接 | test31, test36, test40 |
-    | `list_gates_of_type(type)` | 列出某類 gate（如 XOR） | test39, test40 |
-    | `list_nand_gates_with_pins()` | 列出 NAND 與 I/O signal | test35 |
+## 1.3 Path analysis
 
-### **1.2 Fanin / Fanout / Cone 分析**
+- `path_exists(src, dst, avoid=None)` — Whether a combinational path exists (optionally avoiding a node). Command: `{"op": "path_exists", "args": {"src": "n2", "dst": "n25"}}`
+- `enumerate_paths(src, dst)` — Enumerate all paths between two points. Command: `{"op": "enumerate_paths", "args": {"src": "n3", "dst": "n9"}}`
+- `max_logic_depth(src, dst)` — Maximum logic depth between two points. Command: `{"op": "max_logic_depth", "args": {"src": "n3", "dst": "n9"}}`
+- `longest_comb_path_depth(src, dst)` — Longest combinational path depth. Command: `{"op": "longest_comb_path_depth", "args": {"src": "n3", "dst": "n9"}}`
+- `critical_path_depth(src, dst)` — Critical path depth. Command: `{"op": "critical_path_depth", "args": {"src": "n3", "dst": "n9"}}`
+- `max_comb_depth_pi_to_po()` — Max PI->PO combinational depth across the design. Command: `{"op": "max_comb_depth_pi_to_po", "args": {}}`
+- `paths_length_zero_pi_to_po()` — Length-0 paths (direct PI-to-PO wires). Command: `{"op": "paths_length_zero_pi_to_po", "args": {}}`
+- `all_paths_pass_through(src, dst, node)` — Whether all paths pass through a node. Command: `{"op": "all_paths_pass_through", "args": {"src": "n3", "dst": "n9", "node": "g7"}}`
+- `gate_on_max_depth_path(gate)` — Whether a gate lies on a maximum-depth path. Command: `{"op": "gate_on_max_depth_path", "args": {"gate": "g7"}}`
+- `register_to_register_paths()` — List register-to-register paths. Command: `{"op": "register_to_register_paths", "args": {}}`
+- `max_reg_to_reg_comb_depth()` — Longest register-to-register combinational depth. Command: `{"op": "max_reg_to_reg_comb_depth", "args": {}}`
+- `max_pi_to_dff_d_depth()` — Max depth from a PI to a flip-flop D pin. Command: `{"op": "max_pi_to_dff_d_depth", "args": {}}`
+- `outputs_with_depth_gt(n)` — Outputs whose cone depth exceeds n. Command: `{"op": "outputs_with_depth_gt", "args": {"n": 4}}`
+- `articulation_points_between(src, dst)` — Articulation points between two points. Command: `{"op": "articulation_points_between", "args": {"src": "n3", "dst": "n9"}}`
+- `wire_is_cut_between_pi_po(wire)` — Whether a wire is a cut between any PI and PO. Command: `{"op": "wire_is_cut_between_pi_po", "args": {"wire": "n55104"}}`
 
-- Table
-    
-    
-    | **Tool** | **說明** | **首次出現** |
-    | --- | --- | --- |
-    | `query_input_fanout(input)` | PI fanout + 直接驅動的 gate 列表 | test05 |
-    | `count_gates_driven_by(gate)` | 某 gate 直接驅動多少 gate | test12 |
-    | `list_immediate_successors(gate)` | 列舉 immediate successors | test14 |
-    | `transitive_fanin_cone(output)` | 完整 fanin cone | test15 |
-    | `transitive_fanout_cone(input)` | 完整 fanout cone | test15 |
-    | `gates_reachable_from(node)` | 從某節點可達的所有 gate | test31 |
-    | `shared_fanin_cone_gates(out1, out2)` | 兩 output cone 共用 gate | test31 |
-    | `gates_connected_to_output(gate)` | 連到某 gate output 的所有 gate | test31, test35, test37 |
-    | `gates_driven_by_signal(wire)` | 某 signal 驅動哪些 gate | test36 |
-    | `deepest_fanin_cone_output()` | 哪個 PO fanin cone 最深 | test34, test35 |
-    | `largest_fanin_cone_output()` | 哪個 PO fanin cone 最大 | test40 |
-    | `highest_fanout_primary_input()` | fanout 最高的 PI | test36, test38 |
-    | `max_fanout_of_signal(wire)` | 某 signal 目前最大 fanout | test34, test36, test38 |
+## 1.4 Functional / logic / formal analysis
 
-### **1.3 Path 分析**
+- `signals_equivalent(sig_a, sig_b)` — Whether two signals are functionally equivalent. Command: `{"op": "signals_equivalent", "args": {"sig_a": "n55146", "sig_b": "n55104"}}`
+- `output_always_constant(output, val)` — Whether an output is always a constant value. Command: `{"op": "output_always_constant", "args": {"output": "n8", "val": 0}}`
+- `output_depends_on_input(out, inp)` — Whether an output depends on an input. Command: `{"op": "output_depends_on_input", "args": {"out": "n8", "inp": "n1"}}`
+- `derive_boolean_equation(output)` — Boolean equation of an output in terms of PIs. Command: `{"op": "derive_boolean_equation", "args": {"output": "n25"}}`
+- `write_logic_expression(wire)` — Logic expression for a wire. Command: `{"op": "write_logic_expression", "args": {"wire": "n11"}}`
+- `boolean_function_of_output(output)` — Boolean function of an output. Command: `{"op": "boolean_function_of_output", "args": {"output": "n25"}}`
+- `function_symmetric(node, in_a, in_b)` — Whether a function is symmetric in two inputs. Command: `{"op": "function_symmetric", "args": {"node": "n25", "in_a": "n1", "in_b": "n2"}}`
+- `exists_nand_pair_equivalent_to(wire)` — Whether some (a,b) makes NAND(a,b) equivalent to the wire. Command: `{"op": "exists_nand_pair_equivalent_to", "args": {"wire": "n25"}}`
 
-- Table
-    
-    
-    | **Tool** | **說明** | **首次出現** |
-    | --- | --- | --- |
-    | `path_exists(src, dst, avoid=None)` | 是否存在避開某節點的 combinational path | test06 |
-    | `enumerate_paths(src, dst)` | 列舉兩點間所有 path | test08 |
-    | `max_logic_depth(src, dst)` | 兩點間最大 logic depth | test10 |
-    | `longest_comb_path_depth(src, dst)` | 最長 combinational path depth | test11 |
-    | `critical_path_depth(src, dst)` | critical path depth | test13 |
-    | `max_comb_depth_pi_to_po()` | 全 design PI→PO 最大 depth | test34 |
-    | `paths_length_zero_pi_to_po()` | PI 直連 PO 的 length-0 path | test33 |
-    | `all_paths_pass_through(src, dst, node)` | 是否所有 path 都經過某 gate | test32 |
-    | `gate_on_max_depth_path(gate)` | gate 是否在 max-depth path 上 | test32 |
-    | `register_to_register_paths()` | 列出 register-to-register path | test32 |
-    | `max_reg_to_reg_comb_depth()` | 最長 R2R combinational depth | test40 |
-    | `max_pi_to_dff_d_depth()` | PI 到 DFF D-pin 最大 depth | test31 |
-    | `outputs_with_depth_gt(n)` | depth > n 的 output 列表 | test31 |
-    | `articulation_points_between(src, dst)` | 兩點間 articulation points | test38 |
-    | `wire_is_cut_between_pi_po(wire)` | wire 是否為 PI–PO cut | test33 |
+## 1.5 Sequential / DFF analysis
 
-### **1.4 功能 / 邏輯 / 形式分析**
+- `list_ff_driven_by_clock(clock)` — Flip-flops driven by a given clock. Command: `{"op": "list_ff_driven_by_clock", "args": {"clock": "n0"}}`
+- `analyze_dff_d_input_logic()` — Detect enable/hold structures on flip-flop D inputs. Command: `{"op": "analyze_dff_d_input_logic", "args": {}}`
+- `count_ff_with_enable_hold()` — Number of flip-flops with an enable/hold structure. Command: `{"op": "count_ff_with_enable_hold", "args": {}}`
 
-- Table
-    
-    
-    | **Tool** | **說明** | **首次出現** |
-    | --- | --- | --- |
-    | `signals_equivalent(sig_a, sig_b)` | 兩 signal 是否 functionally equivalent | test17 |
-    | `output_always_constant(output, val)` | output 是否恒為某值 | test31 |
-    | `output_depends_on_input(out, inp)` | output 是否依賴某 input | test33 |
-    | `derive_boolean_equation(output)` | 以 PI 表示 output 的 Boolean 式 | test31 |
-    | `write_logic_expression(wire)` | 寫出某 wire 的 logic expression | test34 |
-    | `boolean_function_of_output(output)` | output 的 Boolean function | test35, test37 |
-    | `function_symmetric(node, in_a, in_b)` | 函數是否對兩 input 對稱 | test36 |
-    | `exists_nand_pair_equivalent_to(wire)` | 是否存在 (a,b) 使 NAND(a,b) ≡ z | test35 |
+## 1.6 Structural health checks
 
-### **1.5 Sequential / DFF 分析**
+- `list_gates_with_constant_input(type, val)` — Gates that have a constant input. Command: `{"op": "list_gates_with_constant_input", "args": {"type": "and", "val": 0}}`
+- `list_gates_with_tied_high()` — Gates with an input tied to 1'b1. Command: `{"op": "list_gates_with_tied_high", "args": {}}`
+- `has_dangling_gates()` — Whether any dangling gate exists. Command: `{"op": "has_dangling_gates", "args": {}}`
+- `has_redundant_gates()` — Whether any redundant gate exists. Command: `{"op": "has_redundant_gates", "args": {}}`
+- `find_floating_signals()` — Floating inputs / unconnected ports. Command: `{"op": "find_floating_signals", "args": {}}`
 
-- Table
-    
-    
-    | **Tool** | **說明** | **首次出現** |
-    | --- | --- | --- |
-    | `list_ff_driven_by_clock(clock)` | 某 clock 驅動的 flip-flop | test35, test36 |
-    | `analyze_dff_d_input_logic()` | 分析 D-pin 是否有 enable/hold 結構 | test40 |
-    | `count_ff_with_enable_hold()` | 有 enable/hold 結構的 FF 數 | test40 |
+## 1.7 Equivalence verification
 
-### **1.6 結構健康檢查（分析，不一定修改）**
+- `verify_equivalent_to_original()` — Equivalent to the netlist as first loaded. Command: `{"op": "verify_equivalent_to_original", "args": {}}`
+- `verify_equivalent_to_pre_transform()` — Equivalent to the snapshot before the last transform. Command: `{"op": "verify_equivalent_to_pre_transform", "args": {}}`
+- `prove_equivalent_to_loaded()` — Equivalent to the original file on disk. Command: `{"op": "prove_equivalent_to_loaded", "args": {}}`
+- `verify_equivalent_sat()` — Equivalent to the original via SAT (gives a counterexample if not). Command: `{"op": "verify_equivalent_sat", "args": {}}`
 
-- Table
-    
-    
-    | **Tool** | **說明** | **首次出現** |
-    | --- | --- | --- |
-    | `list_gates_with_constant_input(type, val)` | 找 constant input 的 gate | test32 |
-    | `list_gates_with_tied_high()` | input 接 1'b1 的 gate | test37 |
-    | `has_dangling_gates()` | 是否存在 dangling gate | test32 |
-    | `has_redundant_gates()` | 是否存在 redundant gate | test38 |
-    | `find_floating_signals()` | floating input / unconnected port | test37 |
+## 1.8 Post-transformation counting
 
-### **1.7 等價性驗證（Analysis，常接在 transformation 後）**
+- `count_added_buffers()` — Buffers added by the last buffer-insertion transform. Command: `{"op": "count_added_buffers", "args": {}}`
+- `count_added_gates_of_type(type)` — Gates of a given type added by the last transform. Command: `{"op": "count_added_gates_of_type", "args": {"type": "nor"}}`
+- `count_removed_dangling()` — Dangling gates removed by the last cleanup. Command: `{"op": "count_removed_dangling", "args": {}}`
+- `count_removed_redundant()` — Redundant gates removed by the last cleanup. Command: `{"op": "count_removed_redundant", "args": {}}`
+- `count_merged_gates()` — Gates merged by the last merge transform. Command: `{"op": "count_merged_gates", "args": {}}`
+- `count_eliminated_by_const_prop(type)` — Gates of a type eliminated by constant propagation. Command: `{"op": "count_eliminated_by_const_prop", "args": {"type": "and"}}`
+- `count_gates_in_cone_after_restructure(output, type)` — Current per-type gate count in a cone. Command: `{"op": "count_gates_in_cone_after_restructure", "args": {"output": "n8", "type": "nand"}}`
+- `cone_depth_after_opt(output)` — Current fanin cone depth of an output. Command: `{"op": "cone_depth_after_opt", "args": {"output": "n8"}}`
 
-- Table
-    
-    
-    | **Tool** | **說明** | **首次出現** |
-    | --- | --- | --- |
-    | `verify_equivalent_to_original()` | 與最初 load 的 netlist 等價 | test32, test34, test36, test40 |
-    | `verify_equivalent_to_pre_transform()` | 與上一個 transformation 前等價 | test31, test35, test37 |
-    | `prove_equivalent_to_loaded()` | 與 disk 上原始檔等價 | test33, test38 |
+## 2.1 Fanout / Buffer (transform)
 
-### **1.8 Transformation 後的計數分析（仍是 query）**
+- `insert_buffers_max_fanout(max=4)` — Insert buffers design-wide so every net's fanout <= max. Command: `{"op": "insert_buffers_max_fanout", "args": {"max": 4}}`
+- `fanout_optimization(max=4)` — Whole-netlist fanout optimization (same as above). Command: `{"op": "fanout_optimization", "args": {"max": 4}}`
+- `insert_buffer_per_load(signal)` — Add one dedicated buffer per load of a signal. Command: `{"op": "insert_buffer_per_load", "args": {"signal": "n5"}}`
+- `insert_buffers_on_signal(signal, max=4)` — Buffer-tree only the given signal (e.g. a clock). Command: `{"op": "insert_buffers_on_signal", "args": {"signal": "n0", "max": 4}}`
 
-- Table
-    
-    
-    | **Tool** | **說明** | **首次出現** |
-    | --- | --- | --- |
-    | `count_added_buffers()` | 新增多少 BUF | test31 |
-    | `count_added_gates_of_type(type)` | 新增多少指定類型 gate（如 NOR / NAND remap 後新增量） | test35 |
-    | `count_removed_dangling()` | 移除多少 dangling gate | test32, test33 |
-    | `count_removed_redundant()` | 移除多少 redundant gate | test38 |
-    | `count_merged_gates()` | merge 了多少 gate | test29, test33 |
-    | `count_eliminated_by_const_prop(type)` | constant propagation 刪了多少 gate | test32, test36, test38, test39 |
-    | `count_gates_in_cone_after_restructure(output, type)` | restructure 後 cone 內某類 gate 數 | test33, test37 |
-    | `cone_depth_after_opt(output)` | optimization 後 cone depth | test40 |
-    | `count_ff_with_enable_hold()` | 同上 sequential 分析 | test40 |
+## 2.2 Depth / Timing optimization (transform)
 
-## **Transformation & Optimization Tasks**
+- `reduce_critical_path_depth()` — Reduce the critical path depth. Command: `{"op": "reduce_critical_path_depth", "args": {}}`
+- `depth_optimization()` — Design-wide logic depth optimization. Command: `{"op": "depth_optimization", "args": {}}`
+- `minimize_max_path_depth()` — Minimize the maximum path depth. Command: `{"op": "minimize_max_path_depth", "args": {}}`
+- `optimize_cone_depth(output, target)` — Reduce an output's cone depth to <= target. Command: `{"op": "optimize_cone_depth", "args": {"output": "n15", "target": 4}}`
+- `optimize_outputs_depth_gt(n, target)` — Optimize every output with depth > n toward target. Command: `{"op": "optimize_outputs_depth_gt", "args": {"n": 4, "target": 4}}`
 
----
+## 2.3 Cleanup / Simplification (transform)
 
-### **2.1 Fanout / Buffer 相關**
+- `remove_dangling_gates()` — Remove dangling gates that do not reach any PO. Command: `{"op": "remove_dangling_gates", "args": {}}`
+- `remove_floating_nodes()` — Remove floating nodes. Command: `{"op": "remove_floating_nodes", "args": {}}`
+- `prune_unused_gates()` — Delete unused logic. Command: `{"op": "prune_unused_gates", "args": {}}`
+- `remove_redundant_gates()` — Remove redundant gates. Command: `{"op": "remove_redundant_gates", "args": {}}`
+- `collapse_back_to_back_inverters()` — Collapse NOT-NOT pairs into a wire. Command: `{"op": "collapse_back_to_back_inverters", "args": {}}`
+- `constant_propagation(type)` — Simplify gates with constant inputs (optionally by type). Command: `{"op": "constant_propagation", "args": {"type": "and"}}`
+- `merge_functionally_equivalent_gates()` — Merge functionally equivalent gates. Command: `{"op": "merge_functionally_equivalent_gates", "args": {}}`
+- `merge_structural_duplicate_gates()` — Merge gates with identical type and inputs. Command: `{"op": "merge_structural_duplicate_gates", "args": {}}`
 
-- Table
-    
-    
-    | **Tool** | **說明** | **首次出現** |
-    | --- | --- | --- |
-    | `insert_buffers_max_fanout(max=4)` | 全 design fanout 限制 | test21 |
-    | `fanout_optimization(max=4)` | 全 netlist fanout 優化 | test24, test26, test34 |
-    | `insert_buffer_per_load(signal)` | 某 signal 每個 load 各加 BUF | test31 |
-    | `insert_buffers_on_signal(signal, max=4)` | 對 clock/reset 等特定 signal 加 buffer | test34, test36, test38 |
+## 2.4 Naming / Connection edits (transform)
 
-### **2.2 Depth / Timing 優化**
+- `rename_gate(old, new)` — Rename a gate instance. Command: `{"op": "rename_gate", "args": {"old": "g0", "new": "renamed_gate"}}`
+- `rename_wire(old, new)` — Rename a wire and update all references. Command: `{"op": "rename_wire", "args": {"old": "n74", "new": "renamed_wire"}}`
+- `reconnect_gate_pin(gate, pin, signal)` — Reconnect a gate input pin to a new signal (may change function). Command: `{"op": "reconnect_gate_pin", "args": {"gate": "g5", "pin": "in0", "signal": "n12"}}`
 
-- Table
-    
-    
-    | **Tool** | **說明** | **首次出現** |
-    | --- | --- | --- |
-    | `reduce_critical_path_depth()` | 降低 critical path depth | test22 |
-    | `depth_optimization()` | 全 design depth 優化 | test25 |
-    | `minimize_max_path_depth()` | 最小化最大 path depth | test24, test27, test28 |
-    | `optimize_cone_depth(output, target)` | 某 output cone depth ≤ target | test26, test27, test33, test40 |
-    | `optimize_outputs_depth_gt(n, target)` | 所有 depth > n 的 output 都優化 | test27 |
+## 2.5 Technology / Logic Remapping (transform)
 
-### **2.3 清理 / 簡化**
-
-- Table
-    
-    
-    | **Tool** | **說明** | **首次出現** |
-    | --- | --- | --- |
-    | `remove_dangling_gates()` | 移除不影響 PO 的 dangling gate/net | test23 |
-    | `remove_floating_nodes()` | 移除 floating node | test30 |
-    | `prune_unused_gates()` | 刪 unused logic | test29, test37 |
-    | `remove_redundant_gates()` | 移除 redundant gate | test38 |
-    | `collapse_back_to_back_inverters()` | NOT-NOT 合併成 wire | test26 |
-    | `constant_propagation(type)` | AND/OR/NAND/NOR constant input 簡化 | test32 |
-    | `merge_functionally_equivalent_gates()` | 合併 functionally equivalent gate pair | test29 |
-    | `merge_structural_duplicate_gates()` | 合併 structural duplicate | test33 |
-
-### **2.4 命名 / 連線修改**
-
-- Table
-    
-    
-    | **Tool** | **說明** | **首次出現** |
-    | --- | --- | --- |
-    | `rename_gate(old, new)` | 重新命名 gate | test24 |
-    | `rename_wire(old, new)` | 重新命名 wire 並更新 reference | test25 |
-    | `reconnect_gate_pin(gate, pin, signal)` | 改接 gate input pin | test36 |
-
-### **2.5 Technology / Logic Remapping**
-
-- Table
-    
-    
-    | **Tool** | **說明** | **首次出現** |
-    | --- | --- | --- |
-    | `replace_or_with_nand_not_in_cone(output)` | cone 內 OR → NAND+NOT | test25 |
-    | `convert_cone_to_nor_not(output)` | cone 改 NOR+NOT | test26, test37 |
-    | `convert_cone_to_nand_not(output)` | cone 改 NAND+NOT | test27, test33, test37 |
-    | `decompose_xor_in_cone(output)` | cone 內 XOR → AND/OR/NOT | test27 |
-    | `reconstruct_netlist_and_not_only()` | 全 design 只用 AND+NOT | test28 |
-    | `remap_netlist_nand_not_only()` | 全 design 只用 NAND+NOT | test40 |
-    | `convert_xnor_to_nor()` | XNOR → NOR-only | test33, test34, test35 |
-    | `convert_xor_to_nand()` | XOR → NAND-only（通常 4 NAND） | test35, test39 |
-    | `replace_nand_const1_with_inverter()` | NAND 一 input 接 1 → NOT | test32, test40 |
+- `replace_or_with_nand_not_in_cone(output)` — In an output's cone, rewrite OR gates as NAND+NOT. Command: `{"op": "replace_or_with_nand_not_in_cone", "args": {"output": "n11[0]"}}`
+- `convert_cone_to_nor_not(output)` — Rewrite a whole cone using only NOR+NOT. Command: `{"op": "convert_cone_to_nor_not", "args": {"output": "n8"}}`
+- `convert_cone_to_nand_not(output)` — Rewrite a whole cone using only NAND+NOT. Command: `{"op": "convert_cone_to_nand_not", "args": {"output": "n8"}}`
+- `decompose_xor_in_cone(output)` — Decompose XOR/XNOR in a cone into AND/OR/NOT. Command: `{"op": "decompose_xor_in_cone", "args": {"output": "n15"}}`
+- `reconstruct_netlist_and_not_only()` — Rewrite the whole design using only AND+NOT. Command: `{"op": "reconstruct_netlist_and_not_only", "args": {}}`
+- `remap_netlist_nand_not_only()` — Rewrite the whole design using only NAND+NOT. Command: `{"op": "remap_netlist_nand_not_only", "args": {}}`
+- `convert_xnor_to_nor()` — Convert every XNOR to a NOR-only network. Command: `{"op": "convert_xnor_to_nor", "args": {}}`
+- `convert_xor_to_nand()` — Convert every XOR to a NAND-only network (4 NANDs). Command: `{"op": "convert_xor_to_nand", "args": {}}`
+- `replace_nand_const1_with_inverter()` — Replace NAND with a constant-1 input by an inverter. Command: `{"op": "replace_nand_const1_with_inverter", "args": {}}`

@@ -289,18 +289,35 @@ def _format_graph_alias(payload: dict[str, Any]) -> str:
     args = payload.get("args", {})
     result = payload["result"]
 
+    from tools.history_compact import format_list_preview
+
     if op == "query_input_fanout":
-        return f"Fanout of input {args['input']} ({len(result)}): {', '.join(result) if result else '(none)'}"
+        return (
+            f"Fanout of input {args['input']} ({len(result)}): "
+            f"{format_list_preview(result)}"
+        )
     if op == "count_gates_driven_by":
         return f"Gate {args['gate']} directly drives {result} gate(s)."
     if op == "list_immediate_successors":
-        return f"Immediate successors of {args['gate']} ({len(result)}): {', '.join(result) if result else '(none)'}"
+        return (
+            f"Immediate successors of {args['gate']} ({len(result)}): "
+            f"{format_list_preview(result)}"
+        )
     if op == "gates_reachable_from":
-        return f"Gates reachable from {args['node']} ({len(result)}): {', '.join(result) if result else '(none)'}"
+        return (
+            f"Gates reachable from {args['node']} ({len(result)}): "
+            f"{format_list_preview(result)}"
+        )
     if op == "gates_connected_to_output":
-        return f"Gates connected to output of {args['gate']} ({len(result)}): {', '.join(result) if result else '(none)'}"
+        return (
+            f"Gates connected to output of {args['gate']} ({len(result)}): "
+            f"{format_list_preview(result)}"
+        )
     if op == "gates_driven_by_signal":
-        return f"Gates driven by signal {args['wire']} ({len(result)}): {', '.join(result) if result else '(none)'}"
+        return (
+            f"Gates driven by signal {args['wire']} ({len(result)}): "
+            f"{format_list_preview(result)}"
+        )
     if op == "deepest_fanin_cone_output":
         output, depth = result
         return f"Deepest fanin cone output: {output} (depth={depth})"

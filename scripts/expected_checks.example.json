@@ -1,0 +1,19 @@
+{
+  "test01": [
+    {"type": "output_parse_ok"},
+    {"type": "no_undefined_signals"},
+    {"type": "gate_type_count_ge", "gate_type": "nand", "value": 0},
+    {"type": "max_fanout_le", "value": 100000},
+    {"type": "log_contains", "text": "successfully written"}
+  ],
+  "test33": [
+    {"type": "output_parse_ok"},
+    {"type": "no_undefined_signals"},
+    {"type": "gate_type_absent", "gate_type": "xnor"},
+    {"type": "gate_type_count_eq", "gate_type": "xnor", "value": 0},
+    {"type": "max_fanout_le", "value": 4},
+    {"type": "max_depth_le", "value": 5},
+    {"type": "log_regex", "pattern": "CHECK_RESULT:.*PASS"},
+    {"type": "check_result_pass"}
+  ]
+}

@@ -8,8 +8,7 @@ the whole ``state`` rather than a single netlist.
 
 Sequential equivalence is reduced to combinational equivalence at the register
 boundary: flip-flops are matched by their Q net, then every primary output and
-every matched flop's D-pin function is compared as a Boolean function over the
-shared free variables (primary inputs and flop Q nets) using BDDs.
+every matched flop's D-pin function is compared via a miter + SAT solver.
 """
 
 from __future__ import annotations
@@ -19,10 +18,9 @@ import re
 from typing import Any
 
 from netlist_twoside import Netlist, parse, PRIM_GATES
-from algorithm.boolean_logic import bdd_equivalent
-from tools.analysis_logic import build_logic_context
 
 _CONST = re.compile(r"1'b[01]")
+_DFF_PINS = ("D", "CK", "RN", "SN")
 
 
 def _dff_by_q(netlist: Netlist) -> dict[str, Any]:
@@ -35,54 +33,90 @@ def _dff_by_q(netlist: Netlist) -> dict[str, Any]:
     return by_q
 
 
-def netlists_equivalent(ref: Netlist, cur: Netlist) -> dict[str, Any]:
-    """Combinational/register-boundary equivalence between two netlists."""
-    if set(ref.inputs) != set(cur.inputs):
-        return {"equivalent": False, "checked_points": 0, "first_mismatch": None,
-                "reason": "primary input sets differ"}
-    if set(ref.outputs) != set(cur.outputs):
-        return {"equivalent": False, "checked_points": 0, "first_mismatch": None,
-                "reason": "primary output sets differ"}
+def _resolve_through_buffers(netlist: Netlist, net: str) -> str:
+    """Follow buf gates back to the first non-buf driver net (or a leaf)."""
+    seen: set[str] = set()
+    while net is not None and net not in seen:
+        seen.add(net)
+        drv = netlist.unique_driver(net)
+        g = netlist.gates.get(drv) if drv else None
+        if g is not None and g.type == "buf":
+            net = g.ins[0]
+        else:
+            return net
+    return net
 
-    ref_ff = _dff_by_q(ref)
-    cur_ff = _dff_by_q(cur)
-    if set(ref_ff) != set(cur_ff):
-        return {"equivalent": False, "checked_points": 0, "first_mismatch": None,
-                "reason": "flip-flop (register) sets differ"}
 
-    ref_ctx = build_logic_context(ref)
-    cur_ctx = build_logic_context(cur)
+def buffer_insertion_equivalent(pre: Netlist, post: Netlist) -> bool:
+    """O(N) proof that ``post`` differs from ``pre`` only by transparent buffers.
 
-    checked = 0
+  Every original gate still sees the same logical signals once buffers are
+  resolved away.  Sound for buffer-insertion transforms; far cheaper than SAT."""
+    if set(pre.inputs) != set(post.inputs) or set(pre.outputs) != set(post.outputs):
+        return False
 
-    # primary outputs
-    for po in sorted(ref.outputs):
-        if not bdd_equivalent(ref_ctx.expr_for_signal(po),
-                              cur_ctx.expr_for_signal(po)):
-            return {"equivalent": False, "checked_points": checked,
-                    "first_mismatch": po,
-                    "reason": f"output {po} has a different Boolean function"}
-        checked += 1
+    def same(pre_net: str | None, post_net: str | None) -> bool:
+        if pre_net is None or post_net is None:
+            return pre_net == post_net
+        return (_resolve_through_buffers(pre, pre_net)
+                == _resolve_through_buffers(post, post_net))
 
-    # flip-flop D-pin functions, matched by Q net
-    for q in sorted(ref_ff):
-        ref_d = ref_ff[q].ports.get("D")
-        cur_d = cur_ff[q].ports.get("D")
-        ref_expr = ref_ctx.expr_for_signal(ref_d) if ref_d else None
-        cur_expr = cur_ctx.expr_for_signal(cur_d) if cur_d else None
-        if ref_expr is None or cur_expr is None:
-            if ref_d != cur_d:
-                return {"equivalent": False, "checked_points": checked,
-                        "first_mismatch": q,
-                        "reason": f"flip-flop on Q={q} has a different D connection"}
-        elif not bdd_equivalent(ref_expr, cur_expr):
-            return {"equivalent": False, "checked_points": checked,
-                    "first_mismatch": q,
-                    "reason": f"flip-flop on Q={q} has a different next-state function"}
-        checked += 1
+    for name, pg in pre.gates.items():
+        qg = post.gates.get(name)
+        if qg is None or qg.type != pg.type or qg.out != pg.out:
+            return False
+        if pg.type == "dff":
+            for pin in _DFF_PINS:
+                if not same(pg.ports.get(pin), qg.ports.get(pin)):
+                    return False
+        else:
+            if len(qg.ins) != len(pg.ins):
+                return False
+            if any(not same(a, b) for a, b in zip(pg.ins, qg.ins)):
+                return False
+    return True
 
-    return {"equivalent": True, "checked_points": checked,
-            "first_mismatch": None, "reason": "all comparison points match"}
+
+def _netlists_identical(ref: Netlist, cur: Netlist) -> bool:
+    if (set(ref.inputs) != set(cur.inputs)
+            or set(ref.outputs) != set(cur.outputs)):
+        return False
+    if set(ref.gates.keys()) != set(cur.gates.keys()):
+        return False
+    for name, rg in ref.gates.items():
+        cg = cur.gates[name]
+        if rg.type != cg.type or rg.out != cg.out:
+            return False
+        if rg.type == "dff":
+            if rg.ports != cg.ports:
+                return False
+        elif rg.ins != cg.ins:
+            return False
+    return True
+
+
+def _equiv_ok(engine: str, reason: str, checked_points: int = 0) -> dict[str, Any]:
+    return {
+        "equivalent": True,
+        "checked_points": checked_points,
+        "first_mismatch": None,
+        "engine": engine,
+        "reason": reason,
+    }
+
+
+def _try_fast_equivalence(ref: Netlist, cur: Netlist) -> dict[str, Any] | None:
+    """Cheap proofs before building a SAT miter."""
+    if ref is cur:
+        return _equiv_ok("identity", "same netlist object")
+    if _netlists_identical(ref, cur):
+        return _equiv_ok("structural", "netlists are structurally identical")
+    if buffer_insertion_equivalent(ref, cur):
+        return _equiv_ok(
+            "structural_buffer",
+            "post differs from pre only by transparent buffer insertion",
+        )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +168,8 @@ class _CnfMiter:
 
         drv = netlist.unique_driver(net)
         gate = netlist.gates.get(drv) if drv else None
+        if gate is not None and gate.type == "buf":
+            return self.lit(netlist, gate.ins[0], scope)
         if gate is None or gate.type == "dff" or gate.type not in PRIM_GATES:
             return self.shared_var(net)      # free leaf, shared between copies
 
@@ -180,7 +216,11 @@ class _CnfMiter:
 
 
 def miter_equivalent(ref: Netlist, cur: Netlist) -> dict[str, Any]:
-    """SAT-based equivalence: build a miter and prove it is unsatisfiable."""
+    """Prove equivalence via fast structural checks, then miter + SAT."""
+    fast = _try_fast_equivalence(ref, cur)
+    if fast is not None:
+        return fast
+
     try:
         from pysat.solvers import Glucose3
     except ImportError as exc:        # pragma: no cover - environment guard
@@ -221,7 +261,7 @@ def miter_equivalent(ref: Netlist, cur: Netlist) -> dict[str, Any]:
         return {"equivalent": True, "checked_points": 0, "first_mismatch": None,
                 "engine": "sat", "reason": "no comparison points"}
 
-    # assert at least one comparison point differs; UNSAT => equivalent
+    # Assert at least one comparison point differs; UNSAT => equivalent.
     m.clauses.append(list(diff_vars))
 
     solver = Glucose3(bootstrap_with=m.clauses)
@@ -264,7 +304,7 @@ def verify_equivalent_to_original(state: Any) -> dict[str, Any]:
     ref = getattr(state, "original_netlist", None)
     if ref is None:
         ref = cur                       # nothing changed since load
-    return {"reference": "original", **netlists_equivalent(ref, cur)}
+    return {"reference": "original", **miter_equivalent(ref, cur)}
 
 
 def verify_equivalent_to_pre_transform(state: Any) -> dict[str, Any]:
@@ -273,7 +313,7 @@ def verify_equivalent_to_pre_transform(state: Any) -> dict[str, Any]:
     ref = getattr(state, "pre_transform_netlist", None)
     if ref is None:                     # no transform performed yet
         ref = getattr(state, "original_netlist", None) or cur
-    return {"reference": "pre_transform", **netlists_equivalent(ref, cur)}
+    return {"reference": "pre_transform", **miter_equivalent(ref, cur)}
 
 
 def prove_equivalent_to_loaded(state: Any) -> dict[str, Any]:
@@ -283,7 +323,7 @@ def prove_equivalent_to_loaded(state: Any) -> dict[str, Any]:
     if not path or not os.path.exists(path):
         raise ValueError("Original design file is not available on disk.")
     ref = parse(path)
-    return {"reference": f"disk:{path}", **netlists_equivalent(ref, cur)}
+    return {"reference": f"disk:{path}", **miter_equivalent(ref, cur)}
 
 
 def verify_equivalent_sat(state: Any) -> dict[str, Any]:
@@ -306,21 +346,21 @@ OP_TABLE: dict[str, dict[str, Any]] = {
         "required_args": (),
         "category": "verification",
         "public": True,
-        "description": "Verify the current design is equivalent to the originally loaded design.",
+        "description": "Verify the current design is equivalent to the originally loaded design (miter + SAT).",
     },
     "verify_equivalent_to_pre_transform": {
         "func": verify_equivalent_to_pre_transform,
         "required_args": (),
         "category": "verification",
         "public": True,
-        "description": "Verify the current design is equivalent to the snapshot before the last transform.",
+        "description": "Verify the current design is equivalent to the snapshot before the last transform (miter + SAT).",
     },
     "prove_equivalent_to_loaded": {
         "func": prove_equivalent_to_loaded,
         "required_args": (),
         "category": "verification",
         "public": True,
-        "description": "Prove the current design is equivalent to the original design file on disk.",
+        "description": "Prove the current design is equivalent to the original design file on disk (miter + SAT).",
     },
     "verify_equivalent_sat": {
         "func": verify_equivalent_sat,
@@ -368,9 +408,9 @@ def format_verify_result(payload: dict[str, Any]) -> str:
     result = payload["result"]
     verdict = "EQUIVALENT" if result["equivalent"] else "NOT EQUIVALENT"
     ref = {
-        "verify_equivalent_to_original": "originally loaded design",
-        "verify_equivalent_to_pre_transform": "pre-transform snapshot",
-        "prove_equivalent_to_loaded": "original design file on disk",
+        "verify_equivalent_to_original": "originally loaded design (SAT)",
+        "verify_equivalent_to_pre_transform": "pre-transform snapshot (SAT)",
+        "prove_equivalent_to_loaded": "original design file on disk (SAT)",
         "verify_equivalent_sat": "originally loaded design (SAT)",
     }.get(op, result.get("reference", "reference"))
 

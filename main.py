@@ -18,6 +18,7 @@ import argparse
 import copy
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 
@@ -86,6 +87,18 @@ from tools.transform_cleanup import (
     format_transform_cleanup_result,
     try_parse_transform_cleanup_request,
 )
+from tools.transform_rewire import (
+    dispatch_transform_rewire_op,
+    format_transform_rewire_result,
+    try_parse_transform_rewire_request,
+)
+from tools.transform_remap import (
+    dispatch_transform_remap_op,
+    format_transform_remap_result,
+    try_parse_transform_remap_request,
+)
+
+PROJECT_ROOT = os.path.abspath(os.path.dirname(__file__))
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +225,14 @@ def _llm_is_configured(config):
     return bool(_cfg(config, "model") and _llm_api_key(config))
 
 
+def _parse_rate_limit_wait(detail: str, attempt: int) -> float:
+    """Parse OpenAI/Anthropic retry hint from a 429 body; else exponential backoff."""
+    match = re.search(r"try again in (\d+(?:\.\d+)?)\s*s", detail, re.I)
+    if match:
+        return float(match.group(1)) + 0.5
+    return min(30.0, 2.0 ** attempt)
+
+
 def request_llm_text(state, system_prompt, user_content, json_response=False):
     """Ask a configured cloud LLM for text."""
     config = state.config or {}
@@ -224,6 +245,7 @@ def request_llm_text(state, system_prompt, user_content, json_response=False):
     temperature = _cfg(config, "temperature", 0)
     timeout = _cfg(config, "timeout", 30)
     max_output_tokens = _cfg(config, "max_output_tokens")
+    max_retries = int(_cfg(config, "rate_limit_retries", 6))
 
     if provider == "anthropic":
         base_url = _cfg(config, "base_url", "https://api.anthropic.com/v1/messages")
@@ -269,12 +291,23 @@ def request_llm_text(state, system_prompt, user_content, json_response=False):
             method="POST",
         )
 
-    try:
-        with urllib.request.urlopen(request, timeout=float(timeout)) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"LLM HTTP {e.code}: {detail}") from e
+    last_error: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            with urllib.request.urlopen(request, timeout=float(timeout)) as response:
+                body = response.read().decode("utf-8")
+            break
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")
+            if e.code == 429 and attempt < max_retries - 1:
+                time.sleep(_parse_rate_limit_wait(detail, attempt))
+                last_error = RuntimeError(f"LLM HTTP {e.code}: {detail}")
+                continue
+            raise RuntimeError(f"LLM HTTP {e.code}: {detail}") from e
+    else:
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("LLM request failed without a response.")
 
     data = json.loads(body)
     if provider == "anthropic":
@@ -302,7 +335,7 @@ def request_llm_plan(line, state):
 
 
 def _llm_pipeline_enabled(config):
-    return _cfg_bool(config, "pipeline_mode", False)
+    return _cfg_bool(config, "pipeline_mode", True)
 
 
 def _max_pipeline_iterations(config):
@@ -448,6 +481,16 @@ def handle_transform(line, state):
         payload = dispatch_transform_cleanup_op(state, request)
         return format_transform_cleanup_result(payload)
 
+    request = try_parse_transform_rewire_request(line)
+    if request is not None:
+        payload = dispatch_transform_rewire_op(state, request)
+        return format_transform_rewire_result(payload)
+
+    request = try_parse_transform_remap_request(line)
+    if request is not None:
+        payload = dispatch_transform_remap_op(state, request)
+        return format_transform_remap_result(payload)
+
     request = try_parse_tool_request(line)
     if request is not None:
         results = execute_plan(state, request)
@@ -514,41 +557,81 @@ def route_request(line, state):
 
 
 # ---------------------------------------------------------------------------
-# Main loop: the I/O contract. This part is done and should not need changes.
+# Main loop: the I/O contract.
 # ---------------------------------------------------------------------------
+def _emit_response(rid, response, state):
+    """Write one #RESPONSE block to stdout and mirror it to the case log."""
+    block = f"#RESPONSE {rid}\n{response}\n#END {rid}\n"
+    sys.stdout.write(block)
+    sys.stdout.flush()
+    if state.log_file:
+        state.log_file.write(block)
+        state.log_file.flush()
+
+
+def _iter_request_lines(args):
+    """Yield one non-empty prompt line at a time (stdin or testcase file)."""
+    if args.testcase:
+        prompt_path = os.path.join(PROJECT_ROOT, "testcase", args.testcase, "prompt.txt")
+        if not os.path.exists(prompt_path):
+            sys.stderr.write(f"Error: prompt file not found: {prompt_path}\n")
+            sys.exit(1)
+        with open(prompt_path, encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped:
+                    yield stripped
+        return
+
+    for line in sys.stdin:
+        stripped = line.strip()
+        if stripped:
+            yield stripped
+
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("testcase", nargs="?", help="Testcase name, e.g. test10")
     ap.add_argument("-config", dest="config", required=False)
     args = ap.parse_args()
 
     state = State()
-    state.config = load_config(args.config) if args.config else None
+    config_path = args.config
+    if not config_path:
+        default_config = os.path.join(PROJECT_ROOT, "config_openai.yml")
+        if os.path.exists(default_config):
+            config_path = default_config
+    state.config = load_config(config_path) if config_path else None
 
-    # PDF section 3.3 contract: read ONE request per stdin line, answer it with
-    # its own #RESPONSE <id> ... #END <id> block, and flush so the grader sends
-    # the next line. route_request() decides per line whether to run the LLM
-    # pipeline (which keeps its own plan/history records) or the keyword
-    # fallback; either way each line produces exactly one numbered response.
+    start_time = time.perf_counter()
+
     rid = 0
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
+    for line in _iter_request_lines(args):
         rid += 1
-
+        request_start = time.perf_counter()
         try:
             response = route_request(line, state)
         except Exception as e:
             response = f"Error while processing request: {e}"
+        request_elapsed = time.perf_counter() - request_start
 
-        # write to stdout
-        sys.stdout.write(f"#RESPONSE {rid}\n{response}\n#END {rid}\n")
-        sys.stdout.flush()                       # <-- critical: grader waits on this
-
-        # mirror to log
+        request_timing = f"[timing] request {rid}: {request_elapsed:.2f}s"
+        sys.stderr.write(f"{request_timing}\n")
+        sys.stderr.flush()
         if state.log_file:
-            state.log_file.write(f"#RESPONSE {rid}\n{response}\n#END {rid}\n")
+            state.log_file.write(f"{request_timing}\n")
             state.log_file.flush()
+
+        _emit_response(rid, response, state)
+
+    elapsed = time.perf_counter() - start_time
+    case_label = state.case_name or args.testcase or "stdin"
+    timing_msg = f"[timing] {case_label} total: {elapsed:.2f}s"
+    sys.stderr.write(f"{timing_msg}\n")
+    sys.stderr.flush()
+    if state.log_file:
+        state.log_file.write(f"{timing_msg}\n")
+        state.log_file.flush()
 
     if state.log_file:
         state.log_file.close()

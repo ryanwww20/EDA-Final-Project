@@ -3,8 +3,9 @@ Higher-level LLM orchestration pipeline.
 
 This module implements the state-file loop described in docs/llm_pipeline.md:
 
-prompt -> plan.md -> operation.json -> backend execution -> history.json
-       -> current-plan.md -> next operation
+prompt -> Planner LLM -> plan.md
+       -> Main LLM -> request_output or output_operation
+       -> backend execution -> history.json -> plan.md update
 
 The LLM still never executes Python.  Concrete operations are validated and
 dispatched through tools.llm_planner.
@@ -16,13 +17,14 @@ from dataclasses import dataclass, field
 import json
 import os
 import re
+import time
 from typing import Any, Callable
 
 from netlist_twoside import summary
+from tools.history_compact import compact_history_entry, summarize_history_for_llm
 from tools.llm_planner import (
     execute_plan,
     format_plan_results,
-    get_operation_catalog,
     normalize_plan,
     validate_plan,
 )
@@ -31,18 +33,39 @@ from tools.llm_planner import (
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 PIPELINE_DIR_NAME = "llm_state"
 DEBUG_LOG_NAME = "debug.log"
+DOCS_EDA_SKILL_MD_PATH = os.path.join(PROJECT_ROOT, "docs", "EDA_skill.md")
+DOCS_LOWER_SKILL_MD_PATH = os.path.join(PROJECT_ROOT, "docs", "eda_skill.md")
+DOCS_EDA_TOOL_MD_PATH = os.path.join(PROJECT_ROOT, "docs", "EDA_tool.md")
+DOCS_EDA_TOOLS_MD_PATH = os.path.join(PROJECT_ROOT, "docs", "EDA_tools.md")
 TOOL_MD_PATH = os.path.join(PROJECT_ROOT, "tools", "tool.md")
 ROOT_SKILL_MD_PATH = os.path.join(PROJECT_ROOT, "skill.md")
 TOOLS_SKILL_MD_PATH = os.path.join(PROJECT_ROOT, "tools", "skill.md")
 
 LLMCaller = Callable[[str, str, bool], str]
 
+# How many compact history rows to embed in LLM prompts (full trail stays on disk).
+LLM_HISTORY_MAX_ENTRIES = 8
+
+# Disambiguation hints for Main LLM op selection (cone vs global, bulk vs per-gate).
+_MAIN_OP_DISAMBIGUATION = (
+    "Operation selection hints:\n"
+    "- \"gate type IN THE CONE of X\" -> count_gates_by_type_in_cone(output=X), "
+    "NOT count_gates_of_type.\n"
+    "- \"how many gates eliminated by constant propagation\" -> "
+    "count_eliminated_by_const_prop(type=...), NOT count_gates_of_type.\n"
+    "- \"replace ALL xor ... nand\" / \"convert every XOR\" -> convert_xor_to_nand, "
+    "NOT decompose_xor_in_cone or per-gate reconnect.\n"
+    "- \"replace ALL xnor ... nor\" -> convert_xnor_to_nor.\n"
+    "- \"list gates in cone\" / \"gates that contribute to output\" -> "
+    "transitive_fanin_cone(output=X) and report the gate list.\n"
+    "- After a tool call succeeds, prefer request_output; do not repeat the same op."
+)
+
 
 @dataclass
 class PipelinePaths:
     root: str
     plan: str
-    current_plan: str
     operation: str
     history: str
     debug: str
@@ -85,7 +108,6 @@ def get_pipeline_paths(state: Any, case_name: str | None = None) -> PipelinePath
     return PipelinePaths(
         root=root,
         plan=os.path.join(root, "plan.md"),
-        current_plan=os.path.join(root, "current-plan.md"),
         operation=os.path.join(root, "operation.json"),
         history=os.path.join(root, "history.json"),
         debug=os.path.join(root, DEBUG_LOG_NAME),
@@ -141,20 +163,55 @@ def append_debug(path: str, message: str) -> None:
 
 
 def _skill_text() -> str:
-    for path in (ROOT_SKILL_MD_PATH, TOOLS_SKILL_MD_PATH):
+    for path in (
+        DOCS_EDA_SKILL_MD_PATH,
+        DOCS_LOWER_SKILL_MD_PATH,
+        ROOT_SKILL_MD_PATH,
+        TOOLS_SKILL_MD_PATH,
+    ):
         text = read_text(path)
         if text:
             return text
-    return "(No skill.md file was found in the project.)"
+    return "(No EDA_skill.md file was found in the project.)"
 
 
 def _tool_text() -> str:
-    return read_text(TOOL_MD_PATH, default="(tools/tool.md was not found.)")
+    for path in (DOCS_EDA_TOOL_MD_PATH, DOCS_EDA_TOOLS_MD_PATH, TOOL_MD_PATH):
+        text = read_text(path)
+        if text:
+            return text
+    return "(No EDA_tool.md file was found in the project.)"
 
 
-def _catalog_json() -> str:
-    catalog = get_operation_catalog(include_unimplemented=False)
-    return json.dumps(catalog, indent=2, sort_keys=True, ensure_ascii=True)
+def _tool_catalog_text() -> str:
+    """Compact LLM command reference (prefer EDA_tools.md over the 54KB tool.md)."""
+    text = read_text(DOCS_EDA_TOOLS_MD_PATH)
+    if text:
+        return text
+    text = read_text(DOCS_EDA_TOOL_MD_PATH)
+    if text:
+        return text
+    return _tool_text()
+
+
+def _tool_brief_for_planner() -> str:
+    """Category index for Planner LLM -- no per-op args, much smaller than full catalog."""
+    text = read_text(DOCS_EDA_TOOLS_MD_PATH) or read_text(DOCS_EDA_TOOL_MD_PATH)
+    if not text:
+        return (
+            "Operation categories: design_io, netlist_stats, fanin_fanout, path, "
+            "logic, dff, structural_health, verification, transform_stats, "
+            "fanout_buffer, depth_opt, cleanup, rewire, remap."
+        )
+    sections = [line.strip() for line in text.splitlines() if line.startswith("## ")]
+    return (
+        "Available operation categories (Main LLM picks the exact op later):\n"
+        + "\n".join(sections)
+    )
+
+
+def _history_for_llm(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return summarize_history_for_llm(history, max_entries=LLM_HISTORY_MAX_ENTRIES)
 
 
 def _design_context(state: Any) -> dict[str, Any]:
@@ -167,48 +224,47 @@ def _json_block(data: Any) -> str:
     return json.dumps(data, indent=2, sort_keys=True, ensure_ascii=True)
 
 
-def request_llm_high_level_plan(
+def request_llm_plan(
     prompt_text: str,
     state: Any,
     llm_call: LLMCaller,
 ) -> str:
-    """Ask the LLM to create plan.md as Markdown only."""
+    """Ask Planner LLM to create plan.md as Markdown only."""
     system_prompt = (
-        "You are an EDA task planner. Create a high-level Markdown plan. "
-        "Do not emit JSON and do not request tool execution in this response."
+        "You are the Planner LLM for an EDA task pipeline. "
+        "Create a Markdown-only plan.md for the current prompt. "
+        "Do not emit JSON. Do not request or execute tools."
     )
     user_content = (
-        "# User Prompt\n"
-        f"{prompt_text}\n\n"
-        "# Case Context\n"
-        f"{_json_block({'case_name': getattr(state, 'case_name', None), 'design_summary': _design_context(state)})}\n\n"
-        "# skill.md\n"
+        "# EDA_skill.md\n"
         f"{_skill_text()}\n\n"
-        "# tool.md\n"
-        f"{_tool_text()}\n\n"
-        "# Implemented Backend Operation Catalog\n"
-        f"{_catalog_json()}\n\n"
-        "Write a concise Markdown plan covering the task intent, information needed, "
-        "likely backend operations, dependencies, and expected final response. "
-        "End with `Status: in_progress`."
+        "# Operation categories (brief index only)\n"
+        f"{_tool_brief_for_planner()}\n\n"
+        "# Prompt\n"
+        f"{prompt_text}\n\n"
+        "# Runtime Context\n"
+        f"{_json_block({'case_name': getattr(state, 'case_name', None), 'design_summary': _design_context(state)})}\n\n"
+        "Write a concise plan.md that records the task intent, needed information, "
+        "candidate tool operations, dependencies, and expected final output."
     )
     return llm_call(system_prompt, user_content, False).strip()
 
 
-def request_llm_next_operation(
+def request_llm_main_decision(
     state: Any,
-    current_plan: str,
+    prompt_text: str,
+    plan_text: str,
     history: list[dict[str, Any]],
     llm_call: LLMCaller,
-    *,
-    request_text: str = "",
 ) -> str:
-    """Ask the LLM to produce operation.json as JSON only."""
+    """Ask Main LLM for one typed JSON decision."""
     system_prompt = (
-        "You are an EDA operation selector. Return JSON only. "
-        "Use only operations from the implemented backend catalog, or emit "
-        '`{"op":"final_answer","args":{"answer":"..."}}` when THE CURRENT REQUEST '
-        "is fully answered.\n"
+        "You are the Main LLM for an EDA tool pipeline. Return JSON only. "
+        "For each iteration, emit exactly one of these schemas:\n"
+        '{"type":"request_output","output":"final answer text"}\n'
+        '{"type":"output_operation","operation":{"op":"operation_name","args":{}}}\n'
+        "Use request_output only when the current prompt is fully answered. "
+        "Use output_operation when you need a real backend tool result.\n"
         "Critical rules:\n"
         "- Answer ONLY the current request. Do not perform work it did not ask for.\n"
         "- The design state PERSISTS across requests. history.json lists what is "
@@ -220,107 +276,132 @@ def request_llm_next_operation(
         "ONLY if it asks to write/output a file.\n"
         "- NEVER invent a file path, signal, or gate name. Use exact names from the "
         "current request. If a required argument is not present in the request, do "
-        "not guess -- choose a different operation or emit final_answer."
+        "not guess -- choose a different operation or emit request_output explaining "
+        "what is missing.\n"
+        f"{_MAIN_OP_DISAMBIGUATION}"
     )
     user_content = (
-        "# Current Request (answer ONLY this)\n"
-        f"{request_text}\n\n"
-        "# Current Plan\n"
-        f"{current_plan}\n\n"
-        "# history.json (already executed; do not repeat)\n"
-        f"{_json_block(history)}\n\n"
-        "# Case Context\n"
-        f"{_json_block({'case_name': getattr(state, 'case_name', None), 'design_summary': _design_context(state)})}\n\n"
-        "# skill.md\n"
+        "# EDA_skill.md\n"
         f"{_skill_text()}\n\n"
-        "# tool.md\n"
-        f"{_tool_text()}\n\n"
-        "# Implemented Backend Operation Catalog\n"
-        f"{_catalog_json()}\n\n"
-        "Return one concrete operation unless a small ordered batch is necessary. "
-        "The normal schema is:\n"
-        '{"operations":[{"op":"operation_name","args":{}}]}\n'
-        "Use exact signal, gate, and file names from the current request/history."
+        "# EDA_tool.md\n"
+        f"{_tool_catalog_text()}\n\n"
+        "# Prompt\n"
+        f"{prompt_text}\n\n"
+        "# plan.md\n"
+        f"{plan_text}\n\n"
+        "# history.json (recent only; full trail is on disk; do not repeat)\n"
+        f"{_json_block(_history_for_llm(history))}\n\n"
+        "# Runtime Context\n"
+        f"{_json_block({'case_name': getattr(state, 'case_name', None), 'design_summary': _design_context(state)})}\n\n"
+        "Return one JSON object only. Prefer one output_operation at a time. "
+        "Use exact signal, gate, and file names from the prompt/history."
     )
     return llm_call(system_prompt, user_content, True).strip()
 
 
-def request_llm_update_current_plan(
+def request_llm_update_plan(
     state: Any,
-    current_plan: str,
+    prompt_text: str,
+    plan_text: str,
+    latest_entries: list[dict[str, Any]],
     history: list[dict[str, Any]],
     llm_call: LLMCaller,
-    *,
-    original_plan: str,
-    original_prompt: str,
 ) -> str:
-    """Ask the LLM to update current-plan.md as Markdown only."""
+    """Ask Main LLM to update plan.md as Markdown only."""
     system_prompt = (
-        "You update an EDA pipeline progress plan. Return Markdown only. "
-        "Include exactly one status line: `Status: in_progress` or `Status: complete`."
+        "You are the Main LLM updating plan.md after a backend tool result. "
+        "Return Markdown only. Do not emit JSON."
     )
     user_content = (
-        "# Original Prompt\n"
-        f"{original_prompt}\n\n"
-        "# Original plan.md\n"
-        f"{original_plan}\n\n"
-        "# Previous current-plan.md\n"
-        f"{current_plan}\n\n"
-        "# Latest history.json\n"
-        f"{_json_block(history)}\n\n"
-        "# Case Context\n"
+        "# Prompt\n"
+        f"{prompt_text}\n\n"
+        "# Previous plan.md\n"
+        f"{plan_text}\n\n"
+        "# Latest operation result\n"
+        f"{_json_block(summarize_history_for_llm(latest_entries))}\n\n"
+        "# Recent history.json\n"
+        f"{_json_block(_history_for_llm(history))}\n\n"
+        "# Runtime Context\n"
         f"{_json_block({'case_name': getattr(state, 'case_name', None), 'design_summary': _design_context(state)})}\n\n"
-        "Update the plan with completed steps, pending steps, learned facts, "
-        "the likely next operation, and whether the final answer is ready."
+        "Update plan.md with completed steps, pending steps, learned facts, "
+        "and whether the current prompt is ready for request_output."
     )
     return llm_call(system_prompt, user_content, False).strip()
 
 
-def current_plan_is_complete(current_plan: str) -> bool:
-    return re.search(r"^\s*Status\s*:\s*complete\s*$", current_plan, re.I | re.M) is not None
+def _strip_json_fence(raw: str) -> str:
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+    return raw
 
 
-def _operation_for_error(raw_operation: str) -> Any:
+def parse_main_llm_decision(raw_decision: str) -> dict[str, Any]:
+    """Parse and validate Main LLM typed decision JSON."""
     try:
-        plan = normalize_plan(raw_operation)
-    except Exception:
-        return raw_operation
-    operations = plan.get("operations", [])
-    if len(operations) == 1:
-        return operations[0]
-    return {"operations": operations}
+        data = json.loads(_strip_json_fence(raw_decision))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Main LLM output is not valid JSON: {e}") from e
+
+    if not isinstance(data, dict):
+        raise ValueError("Main LLM decision must be a JSON object.")
+
+    decision_type = data.get("type")
+    if decision_type == "request_output":
+        output = data.get("output", "")
+        return {"type": "request_output", "output": str(output)}
+
+    if decision_type == "output_operation":
+        operation = data.get("operation")
+        if not isinstance(operation, dict):
+            raise ValueError("output_operation decision must contain an operation object.")
+        return {"type": "output_operation", "operation": operation}
+
+    # Backward-compatible normalization for older JSON-only operation planners.
+    if "op" in data or "operations" in data:
+        plan = normalize_plan(data)
+        operations = plan["operations"]
+        if len(operations) != 1:
+            raise ValueError("Main LLM must emit exactly one output_operation.")
+        return {"type": "output_operation", "operation": operations[0]}
+
+    raise ValueError("Main LLM decision type must be request_output or output_operation.")
 
 
-def _final_answer_from_operation(raw_operation: str) -> str | None:
-    try:
-        plan = normalize_plan(raw_operation)
-    except Exception:
-        return None
-    operations = plan.get("operations", [])
-    if len(operations) != 1:
-        return None
-    request = operations[0]
-    if request.get("op") != "final_answer":
-        return None
-    args = request.get("args") or {}
-    answer = args.get("answer")
-    return str(answer) if answer is not None else ""
-
-
-def execute_operation_json(
-    state: Any,
-    raw_operation: str,
+def append_request_output_history(
     history_path: str,
+    prompt_text: str,
+    output: str,
+) -> dict[str, Any]:
+    return append_history(
+        history_path,
+        {
+            "prompt": prompt_text,
+            "main_llm_output_type": "request_output",
+            "status": "success",
+            "request_output": output,
+        },
+    )
+
+
+def execute_output_operation(
+    state: Any,
+    operation: dict[str, Any],
+    history_path: str,
+    prompt_text: str,
 ) -> list[dict[str, Any]]:
-    """Validate, execute, and append history entries for operation.json."""
+    """Validate, execute, and append history for one output_operation."""
     entries: list[dict[str, Any]] = []
     try:
-        plan = validate_plan(raw_operation, implemented_only=True)
+        plan = validate_plan({"operations": [operation]}, implemented_only=True)
     except Exception as e:
         entry = append_history(
             history_path,
             {
-                "operation": _operation_for_error(raw_operation),
+                "prompt": prompt_text,
+                "main_llm_output_type": "output_operation",
+                "operation": operation,
                 "status": "error",
                 "error": str(e),
             },
@@ -337,18 +418,22 @@ def execute_operation_json(
             for result in results:
                 entry = append_history(
                     history_path,
-                    {
+                    compact_history_entry({
+                        "prompt": prompt_text,
+                        "main_llm_output_type": "output_operation",
                         "operation": result["request"],
                         "status": "success",
-                        "payload": result["payload"],
+                        "tool_output": result["payload"],
                         "text": result["text"],
-                    },
+                    }),
                 )
                 entries.append(entry)
         except Exception as e:
             entry = append_history(
                 history_path,
                 {
+                    "prompt": prompt_text,
+                    "main_llm_output_type": "output_operation",
                     "operation": operation,
                     "status": "error",
                     "error": str(e),
@@ -358,8 +443,40 @@ def execute_operation_json(
     return entries
 
 
+def execute_operation_json(
+    state: Any,
+    raw_operation: Any,
+    history_path: str,
+) -> list[dict[str, Any]]:
+    """Compatibility wrapper for older tests and callers.
+
+    New pipeline code should use execute_output_operation(), because history
+    entries now record the prompt and Main LLM output type.
+    """
+    try:
+        plan = validate_plan(raw_operation, implemented_only=True)
+    except Exception as e:
+        entry = append_history(
+            history_path,
+            {
+                "main_llm_output_type": "output_operation",
+                "operation": raw_operation,
+                "status": "error",
+                "error": str(e),
+            },
+        )
+        return [entry]
+
+    entries: list[dict[str, Any]] = []
+    for operation in plan["operations"]:
+        entries.extend(execute_output_operation(state, operation, history_path, ""))
+    return entries
+
+
 def _latest_response_text(history: list[dict[str, Any]]) -> str:
     for entry in reversed(history):
+        if entry.get("status") == "success" and entry.get("request_output"):
+            return str(entry["request_output"])
         if entry.get("status") == "success" and entry.get("text"):
             return str(entry["text"])
         if entry.get("status") == "error" and entry.get("error"):
@@ -393,20 +510,18 @@ def run_llm_pipeline(
         append_debug(paths.debug, f"pipeline_dir={paths.root}")
         append_debug(paths.debug, f"initialized history.json={paths.history}")
     append_debug(paths.debug, f"\n=== request: {prompt_text!r} (case={case_name}) ===")
+    request_start = time.perf_counter()
 
-    # Everything recorded by earlier requests in this testcase stays on disk as
-    # the record, but the LLM only sees this request's slice so prior requests
-    # do not confuse planning or trip completion detection early.
+    # Everything recorded by earlier requests in this testcase stays on disk.
+    # The Main LLM sees a compact summary of history.json; base_len lets us
+    # summarize only this prompt round if the loop stops without request_output.
     base_len = len(read_history(paths.history))
 
-    plan = request_llm_high_level_plan(prompt_text, state, llm_call)
+    plan = request_llm_plan(prompt_text, state, llm_call)
     write_text(paths.plan, plan + ("\n" if not plan.endswith("\n") else ""))
-    write_text(paths.current_plan, plan + ("\n" if not plan.endswith("\n") else ""))
     append_debug(paths.debug, f"wrote plan.md={paths.plan}")
-    append_debug(paths.debug, f"wrote current-plan.md={paths.current_plan}")
 
-    current_plan = plan
-    final_answer: str | None = None
+    response: str | None = None
     stop_reason = "max_iterations"
     repeated_error_iterations = 0
     iteration_count = 0
@@ -414,40 +529,46 @@ def run_llm_pipeline(
     for iteration in range(1, max(0, max_iterations) + 1):
         iteration_count = iteration
         history = read_history(paths.history)
-        raw_operation = request_llm_next_operation(
-            state, current_plan, history, llm_call, request_text=prompt_text
+        raw_decision = request_llm_main_decision(
+            state,
+            prompt_text,
+            plan,
+            history,
+            llm_call,
         )
-        write_text(paths.operation, raw_operation + ("\n" if not raw_operation.endswith("\n") else ""))
-        append_debug(paths.debug, f"iteration={iteration} wrote operation.json={paths.operation}")
+        write_text(paths.operation, raw_decision + ("\n" if not raw_decision.endswith("\n") else ""))
+        append_debug(paths.debug, f"iteration={iteration} wrote main decision={paths.operation}")
 
-        final_answer = _final_answer_from_operation(raw_operation)
-        if final_answer is not None:
+        try:
+            decision = parse_main_llm_decision(raw_decision)
+        except Exception as e:
             append_history(
                 paths.history,
                 {
-                    "operation": {"op": "final_answer", "args": {"answer": final_answer}},
-                    "status": "success",
-                    "payload": {"answer": final_answer},
-                    "text": final_answer,
+                    "prompt": prompt_text,
+                    "main_llm_output_type": "parse_error",
+                    "status": "error",
+                    "raw_main_llm_output": raw_decision,
+                    "error": str(e),
                 },
             )
-            history = read_history(paths.history)
-            current_plan = request_llm_update_current_plan(
-                state,
-                current_plan,
-                history,
-                llm_call,
-                original_plan=plan,
-                original_prompt=prompt_text,
-            )
-            if not current_plan_is_complete(current_plan):
-                current_plan += "\nStatus: complete\n"
-            write_text(paths.current_plan, current_plan + ("\n" if not current_plan.endswith("\n") else ""))
-            append_debug(paths.debug, "stop_reason=final_answer")
-            stop_reason = "final_answer"
+            append_debug(paths.debug, f"iteration={iteration} parse_error={e}")
+            stop_reason = "parse_error"
             break
 
-        entries = execute_operation_json(state, raw_operation, paths.history)
+        if decision["type"] == "request_output":
+            response = decision["output"]
+            append_request_output_history(paths.history, prompt_text, response)
+            append_debug(paths.debug, "stop_reason=request_output")
+            stop_reason = "request_output"
+            break
+
+        entries = execute_output_operation(
+            state,
+            decision["operation"],
+            paths.history,
+            prompt_text,
+        )
         for entry in entries:
             op = entry.get("operation", {})
             append_debug(paths.debug, f"iteration={iteration} executed={op} status={entry.get('status')}")
@@ -458,21 +579,17 @@ def run_llm_pipeline(
             repeated_error_iterations = 0
 
         history = read_history(paths.history)
-        current_plan = request_llm_update_current_plan(
+        plan = request_llm_update_plan(
             state,
-            current_plan,
+            prompt_text,
+            plan,
+            entries,
             history,
             llm_call,
-            original_plan=plan,
-            original_prompt=prompt_text,
         )
-        write_text(paths.current_plan, current_plan + ("\n" if not current_plan.endswith("\n") else ""))
-        append_debug(paths.debug, f"iteration={iteration} updated current-plan.md={paths.current_plan}")
+        write_text(paths.plan, plan + ("\n" if not plan.endswith("\n") else ""))
+        append_debug(paths.debug, f"iteration={iteration} updated plan.md={paths.plan}")
 
-        if current_plan_is_complete(current_plan):
-            append_debug(paths.debug, "stop_reason=current_plan_complete")
-            stop_reason = "current_plan_complete"
-            break
         if repeated_error_iterations >= max_repeated_errors:
             append_debug(paths.debug, "stop_reason=repeated_errors")
             stop_reason = "repeated_errors"
@@ -482,9 +599,12 @@ def run_llm_pipeline(
 
     history = read_history(paths.history)
     request_history = history[base_len:]
-    response = final_answer if final_answer is not None else _latest_response_text(request_history)
     if not response:
         response = format_plan_results([])
+    if response == "[no operations]":
+        response = _latest_response_text(request_history)
+    request_elapsed = time.perf_counter() - request_start
+    append_debug(paths.debug, f"request_elapsed={request_elapsed:.2f}s")
     return PipelineRunResult(
         response=response,
         stop_reason=stop_reason,

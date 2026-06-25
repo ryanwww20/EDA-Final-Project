@@ -198,12 +198,15 @@ def enumerate_paths(
     netlist: Netlist, src: str, dst: str, limit: int = 2000
 ) -> dict:
     """Enumerate combinational paths src->dst as net / gate sequences."""
-    fwd, _ = _build_net_graph(netlist)
+    fwd, bwd = _build_net_graph(netlist)
     s = _resolve_src(netlist, src)
     d = _resolve_dst(netlist, dst)
     paths: list = []
     truncated = False
     if s is not None and d is not None:
+        # Only follow nets that can still reach dst; avoids exploring dead
+        # branches that fan out to unrelated outputs in large designs.
+        to_dst = _reachable(bwd, [d])
         stack = [(s, (s,), ())]
         while stack:
             net, npath, gpath = stack.pop()
@@ -214,7 +217,7 @@ def enumerate_paths(
                     break
                 continue
             for nxt, gname in fwd.get(net, []):
-                if nxt in npath:          # DAG, but guard against any cycle
+                if nxt not in to_dst or nxt in npath:
                     continue
                 stack.append((nxt, npath + (nxt,), gpath + (gname,)))
     return {
@@ -621,12 +624,23 @@ def format_path_result(payload: dict) -> str:
         return f"Path from {args['src']} to {args['dst']}{extra}: {ans}"
 
     if op == "enumerate_paths":
-        lines = [f"Paths from {result['src']} to {result['dst']}: {result['count']}"
-                 + (" (truncated)" if result["truncated"] else "")]
-        for i, p in enumerate(result["paths"], 1):
+        from tools.history_compact import MAX_PATH_PREVIEW
+
+        count = result["count"]
+        header = (
+            f"Paths from {result['src']} to {result['dst']}: {count}"
+            + (" (truncated)" if result["truncated"] else "")
+        )
+        lines = [header]
+        preview = result["paths"][:MAX_PATH_PREVIEW]
+        for i, p in enumerate(preview, 1):
             chain = " -> ".join(p["nets"])
             gates = ", ".join(p["gates"]) if p["gates"] else "(direct)"
             lines.append(f"  {i}. {chain}  [gates: {gates}]")
+        if count > len(preview):
+            lines.append(
+                f"  ... ({count - len(preview)} more path(s) omitted from display)"
+            )
         return "\n".join(lines)
 
     if op in ("max_logic_depth", "longest_comb_path_depth", "critical_path_depth"):

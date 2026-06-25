@@ -23,7 +23,7 @@ from collections import Counter, defaultdict
 from typing import Any
 
 from netlist_twoside import Gate, Netlist
-from tools.verify_equivalence import miter_equivalent
+from tools.verify_equivalence import buffer_insertion_equivalent, miter_equivalent
 
 _CONST = re.compile(r"1'b[01]")
 _DFF_PINS = ("D", "CK", "RN", "SN")
@@ -206,53 +206,6 @@ def _limit_fanout_for_net(
     return added
 
 
-def _resolve_through_buffers(netlist: Netlist, net: str) -> str:
-    """Follow buf gates back to the first non-buf driver net (or a leaf)."""
-    seen: set[str] = set()
-    while net is not None and net not in seen:
-        seen.add(net)
-        drv = netlist.unique_driver(net)
-        g = netlist.gates.get(drv) if drv else None
-        if g is not None and g.type == "buf":
-            net = g.ins[0]
-        else:
-            return net
-    return net
-
-
-def _buffer_insertion_equivalent(pre: Netlist, post: Netlist) -> bool:
-    """Structural, O(N) proof that ``post`` differs from ``pre`` only by
-    transparent buffer insertion (every original gate still sees the same
-    logical signals once buffers are resolved away).  Sound for this transform
-    class; far cheaper than a SAT miter on large designs.
-
-    Buffers are resolved away on *both* sides, so any buffers already present in
-    the original design cancel out and only the inserted ones matter."""
-    if set(pre.inputs) != set(post.inputs) or set(pre.outputs) != set(post.outputs):
-        return False
-
-    def same(pre_net: str | None, post_net: str | None) -> bool:
-        if pre_net is None or post_net is None:
-            return pre_net == post_net
-        return _resolve_through_buffers(pre, pre_net) == \
-            _resolve_through_buffers(post, post_net)
-
-    for name, pg in pre.gates.items():
-        qg = post.gates.get(name)
-        if qg is None or qg.type != pg.type or qg.out != pg.out:
-            return False
-        if pg.type == "dff":
-            for pin in _DFF_PINS:
-                if not same(pg.ports.get(pin), qg.ports.get(pin)):
-                    return False
-        else:
-            if len(qg.ins) != len(pg.ins):
-                return False
-            if any(not same(a, b) for a, b in zip(pg.ins, qg.ins)):
-                return False
-    return True
-
-
 def _report(
     op: str,
     added: list[str],
@@ -428,8 +381,8 @@ def dispatch_transform_fanout_op(
 
     # Fast O(N) structural proof (buffers are transparent); fall back to the
     # SAT miter only if the cheap proof is inconclusive.
-    equivalent = _buffer_insertion_equivalent(state.pre_transform_netlist,
-                                              state.netlist)
+    equivalent = buffer_insertion_equivalent(state.pre_transform_netlist,
+                                             state.netlist)
     report["verify_method"] = "structural"
     if not equivalent:
         sat = miter_equivalent(state.pre_transform_netlist, state.netlist)
